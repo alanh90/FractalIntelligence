@@ -19,9 +19,8 @@ SCALES = [50, 100, 200]  # partial patterns
 PARAM_LIMIT = 10.0
 POP_SIZE = 5
 GENERATIONS = 3
-
-GRID_SIZE = 50   # fixed grid size for dimension & lacunarity
-BOX_SIZES = [2,4,8]  # few box sizes for fractal dimension
+GRID_SIZE = 50  # fixed-size grid to avoid memory issues
+BOX_SIZES = np.array([2.0,4.0,8.0], dtype=np.float64) # for fractal dimension approximation
 
 FUNCTIONS = [
     ('+', 2),
@@ -141,138 +140,198 @@ def clamp_params(params):
 def generate_fractal_points(transformations, num_points=200, seed=0):
     np.random.seed(seed)
     x, y = 0.0, 0.0
-    points = np.empty((num_points,2), dtype=np.float64)
+    points = np.empty((num_points, 2), dtype=np.float64)
     t_count = transformations.shape[0]
-    length = 0
+    count=0
     for i in range(num_points):
         idx = np.random.randint(t_count)
         t = transformations[idx]
         x_new = t[0]*x + t[1]*y + t[2]
         y_new = t[3]*x + t[4]*y + t[5]
-        if not (np.isfinite(x_new) and np.isfinite(y_new)):
+        if not (math.isfinite(x_new) and math.isfinite(y_new)):
             break
         if abs(x_new)>1e6 or abs(y_new)>1e6:
             break
         x, y = x_new, y_new
-        points[i,0] = x
-        points[i,1] = y
-        length+=1
-    return points[:length]
+        points[count,0] = x
+        points[count,1] = y
+        count+=1
+    return points[:count]
 
 @njit
-def safe_scale_points(points, grid_size=GRID_SIZE):
-    if points.shape[0]<2:
-        return False, np.zeros((grid_size,grid_size))
+def to_grid(points, grid_size=GRID_SIZE):
+    # Scale points to [0,1] and map to grid
+    if points.shape[0]<1:
+        return np.zeros((grid_size,grid_size), dtype=np.float64)
     xs = points[:,0]
     ys = points[:,1]
-    if xs.size<2:
-        return False, np.zeros((grid_size,grid_size))
     xmin = np.min(xs)
     xmax = np.max(xs)
     ymin = np.min(ys)
     ymax = np.max(ys)
-    width = xmax - xmin + 1e-9
-    height = ymax - ymin + 1e-9
+    width = (xmax - xmin)+1e-9
+    height = (ymax - ymin)+1e-9
     grid = np.zeros((grid_size,grid_size), dtype=np.float64)
-    for i in range(xs.size):
-        X = (xs[i]-xmin)/width
-        Y = (ys[i]-ymin)/height
-        if 0<=X<1 and 0<=Y<1:
-            gx = int(X*grid_size)
-            gy = int(Y*grid_size)
+    for i in range(points.shape[0]):
+        gx = int((points[i,0]-xmin)/width*grid_size)
+        gy = int((points[i,1]-ymin)/height*grid_size)
+        if gx>=0 and gx<grid_size and gy>=0 and gy<grid_size:
             grid[gx,gy]+=1
-    return True, grid
+    return grid
 
 @njit
-def fractal_dimension(grid, box_sizes=(2,4,8)):
-    # box-count dimension on scaled grid
+def fractal_dimension(grid, box_sizes=np.array([2.0,4.0,8.0], dtype=np.float64)):
+    # Approx fractal dimension via box-counting on the fixed grid
     gx, gy = grid.shape
-    counts = []
-    scale_factors = []
-    for b in box_sizes:
-        if b>0:
-            step_x = gx//b
-            step_y = gy//b
-            if step_x<1 or step_y<1:
-                # too large a box partition, skip
-                continue
-            boxes = 0
-            for ix in range(b):
-                for iy in range(b):
-                    sub = grid[ix*step_x:(ix+1)*step_x, iy*step_y:(iy+1)*step_y]
-                    if np.any(sub>0):
-                        boxes+=1
-            counts.append(boxes)
-            scale_factors.append(b)
-    if len(counts)<2:
+    counts = np.empty(box_sizes.size, dtype=np.float64)
+    for i in range(box_sizes.size):
+        s = box_sizes[i]
+        step_x = int(gx/s)
+        step_y = int(gy/s)
+        if step_x<1 or step_y<1:
+            counts[i]=1e-9
+            continue
+        sub_count=0
+        for xx in range(0,gx,step_x):
+            for yy in range(0,gy,step_y):
+                # check if any point in this box
+                found=False
+                for u in range(xx, min(xx+step_x, gx)):
+                    for v in range(yy, min(yy+step_y, gy)):
+                        if grid[u,v]>0:
+                            found=True
+                            break
+                    if found:
+                        break
+                if found:
+                    sub_count+=1
+        if sub_count<1:
+            sub_count=1e-9
+        counts[i]=sub_count
+    logN = np.log(counts)
+    scale = box_sizes
+    logS = np.log(1.0/scale)
+
+    # compute slope m:
+    meanX = 0.0
+    meanY = 0.0
+    n = logS.size
+    for val in logS:
+        meanX += val
+    meanX/=n
+    for val in logN:
+        meanY+=val
+    meanY/=n
+    num=0.0
+    den=0.0
+    for j in range(n):
+        dx = logS[j]-meanX
+        dy = logN[j]-meanY
+        num += dx*dy
+        den += dx*dx
+    if den<1e-12:
         return 0.0
-    counts = np.array(counts, dtype=np.float64)
-    scale_factors = np.array(scale_factors, dtype=np.float64)
-    logN = np.log(counts+1e-9)
-    logS = np.log(1.0/scale_factors)
-    A = np.vstack((logS, np.ones(len(logS)))).T
-    sol = np.linalg.lstsq(A, logN, rcond=None)[0]
-    m = sol[0]
+    m = num/den
     return m
 
 @njit
 def lacunarity(grid):
-    # lacunarity = var/mean^2 of occupancy
-    mean_val = np.mean(grid)
-    var_val = np.var(grid)
-    if mean_val>1e-9:
+    # Lacunarity: var/mean^2 of box counts
+    mean_val = 0.0
+    count=0
+    for row in grid:
+        for val in row:
+            mean_val+=val
+            count+=1
+    if count<1:
+        return 0.0
+    mean_val /= count
+    var_val=0.0
+    for row in grid:
+        for val in row:
+            diff = val-mean_val
+            var_val += diff*diff
+    var_val/=count
+    if mean_val>1e-12:
         return var_val/(mean_val**2)
-    return 0.0
+    else:
+        return 0.0
 
 @njit
 def basic_geometry(grid):
-    # interpret grid as distribution of points
-    gx, gy = grid.shape
-    total = np.sum(grid)
-    if total<1:
-        return (0.0,0.0,0.0,0.0) # no structure
-    xs = []
-    ys = []
-    for ix in range(gx):
-        for iy in range(gy):
-            c = grid[ix,iy]
-            for _ in range(int(c)):
-                xs.append(ix)
-                ys.append(iy)
-    if len(xs)<2:
+    # from grid get width,height,x_var,y_var approximations
+    # approximate coordinates from grid
+    gx,gy = grid.shape
+    total = 0.0
+    sumx=0.0
+    sumy=0.0
+    for x in range(gx):
+        for y in range(gy):
+            w = grid[x,y]
+            total+=w
+            sumx+=x*w
+            sumy+=y*w
+    if total<1e-9:
         return (0.0,0.0,0.0,0.0)
-    xarr = np.array(xs, dtype=np.float64)
-    yarr = np.array(ys, dtype=np.float64)
-    width = (np.max(xarr)-np.min(xarr)+1e-9)
-    height = (np.max(yarr)-np.min(yarr)+1e-9)
-    x_var = np.var(xarr)
-    y_var = np.var(yarr)
-    return (width,height,x_var,y_var)
+    meanx = sumx/total
+    meany = sumy/total
+    varx=0.0
+    vary=0.0
+    minx = gx
+    maxx = 0
+    miny = gy
+    maxy = 0
+    for x in range(gx):
+        for y in range(gy):
+            w=grid[x,y]
+            if w>0:
+                if x<minx:
+                    minx=x
+                if x>maxx:
+                    maxx=x
+                if y<miny:
+                    miny=y
+                if y>maxy:
+                    maxy=y
+                dx = x-meanx
+                dy = y-meany
+                varx+=dx*dx*w
+                vary+=dy*dy*w
+    varx/=total
+    vary/=total
+    width = (maxx-minx+1e-9)/(gx)
+    height=(maxy-miny+1e-9)/(gy)
+    return (width,height,varx,vary)
 
 @njit
 def extract_features_single_scale(points):
-    # scale and check
-    ok, grid = safe_scale_points(points)
-    if not ok:
-        # no points or invalid, return zeros
+    # If not enough points
+    if points.shape[0]<2:
         return np.zeros(6, dtype=np.float64)
+    grid = to_grid(points, GRID_SIZE)
     fd = fractal_dimension(grid)
     lac = lacunarity(grid)
-    w,h,xv,yv = basic_geometry(grid)
-    # fd, lac, width, height, x_var, y_var
-    feats = np.array([fd, lac, w, h, xv, yv], dtype=np.float64)
+    w,h,vx,vy = basic_geometry(grid)
+    # 6 features: fd, lac, width, height, varx, vary
+    feats = np.array([fd,lac,w,h,vx,vy], dtype=np.float64)
     return feats
 
+@njit
 def extract_features_multi_scale(points):
-    feat_list = []
-    for scale in SCALES:
-        if len(points)>=scale:
-            psub = points[:scale]
-            feats = extract_features_single_scale(psub)
+    # For each scale in SCALES, compute features_single_scale and concat
+    # SCALES * 6 features total
+    feat_len = len(SCALES)*6
+    feats = np.zeros(feat_len, dtype=np.float64)
+    for i,sc in enumerate(SCALES):
+        if points.shape[0]>=sc:
+            sub = points[:sc]
+            f = extract_features_single_scale(sub)
+            for j in range(6):
+                feats[i*6+j]=f[j]
         else:
-            feats = np.zeros(6)
-        feat_list.append(feats)
-    return np.concatenate(feat_list)
+            # no enough points, keep zeros
+            pass
+    return feats
 
 def evaluate_individual(ind, X_train, y_train, X_val, y_val):
     train_sample_size = min(30, len(X_train))
@@ -295,7 +354,7 @@ def evaluate_individual(ind, X_train, y_train, X_val, y_val):
         params = [evaluate_expr(expr, meanX, stdX, varX) for expr in ind]
         params = clamp_params(params)
         transformations = np.array(params).reshape(1,6)
-        points = generate_fractal_points(transformations, num_points=NUM_POINTS, seed=0)
+        points = generate_fractal_points(transformations, num_points=NUM_POINTS, seed=SEED)
         if len(points)>0:
             feats = extract_features_multi_scale(points)
         else:
@@ -309,7 +368,7 @@ def evaluate_individual(ind, X_train, y_train, X_val, y_val):
         params = [evaluate_expr(expr, meanX, stdX, varX) for expr in ind]
         params = clamp_params(params)
         transformations = np.array(params).reshape(1,6)
-        points = generate_fractal_points(transformations, num_points=NUM_POINTS, seed=0)
+        points = generate_fractal_points(transformations, num_points=NUM_POINTS, seed=SEED)
         if len(points)>0:
             feats = extract_features_multi_scale(points)
         else:
@@ -369,7 +428,7 @@ def final_evaluation(best_ind, X_trainval, y_trainval, X_test, y_test):
         params = [evaluate_expr(expr, meanX, stdX, varX) for expr in best_ind]
         params = clamp_params(params)
         transformations = np.array(params).reshape(1,6)
-        points = generate_fractal_points(transformations, num_points=NUM_POINTS, seed=0)
+        points = generate_fractal_points(transformations, num_points=NUM_POINTS, seed=SEED)
         if len(points)>0:
             feats = extract_features_multi_scale(points)
         else:
@@ -383,7 +442,7 @@ def final_evaluation(best_ind, X_trainval, y_trainval, X_test, y_test):
         params = [evaluate_expr(expr, meanX, stdX, varX) for expr in best_ind]
         params = clamp_params(params)
         transformations = np.array(params).reshape(1,6)
-        points = generate_fractal_points(transformations, num_points=NUM_POINTS, seed=0)
+        points = generate_fractal_points(transformations, num_points=NUM_POINTS, seed=SEED)
         if len(points)>0:
             feats = extract_features_multi_scale(points)
         else:
@@ -433,7 +492,7 @@ def run_experiments_fi():
         fi_results.append({
             "Dataset": dataset_name,
             "FI Balanced Accuracy": fi_acc,
-            "FI Total Training Time (s)": round(fi_train_time, 4),
+            "FI Training Time (s)": round(fi_train_time, 4),
             "FI Prediction Time (s)": round(fi_pred_time, 4),
         })
 
