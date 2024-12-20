@@ -1,143 +1,95 @@
+'''
+================================================================================
+SUMMARY OF FI RESULTS
+================================================================================
+      Dataset  FI Balanced Accuracy  FI Total Training Time (s)  FI Prediction Time (s)
+        Moons              0.620000                      1.2131                  0.0179
+      Circles              0.790000                      0.0672                  0.0170
+       Digits              0.142411                      0.0675                  0.0613
+         Iris              0.633333                      0.0689                  0.0061
+Breast Cancer              0.845238                      0.0695                  0.0201
+         Wine              0.615873                      0.0669                  0.0077
+'''
+
 import numpy as np
 import time
 import pandas as pd
+import math, random
 from sklearn.datasets import make_moons, make_circles, load_digits, load_iris, load_breast_cancer, load_wine
 from sklearn.model_selection import train_test_split
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import balanced_accuracy_score
-from scipy.spatial import ConvexHull
-import math, random
+from numba import njit
 
 ##########################################################
-# Fractal Generation
+# Parameters
+##########################################################
+NUM_POINTS = 200  # fewer points for speed
+POP_SIZE = 5
+GENERATIONS = 3
+PARAM_LIMIT = 10.0  # limit transformations to this range
+
+##########################################################
+# Safe Fractal Generation with Clamping
 ##########################################################
 
-def generate_fractal_points(transformations, num_points=500, seed=0):
+@njit
+def generate_fractal_points(transformations, num_points=200, seed=0):
     np.random.seed(seed)
-    num_transformations = transformations.shape[0]
     x, y = 0.0, 0.0
-    points = []
-    for _ in range(num_points):
-        t = transformations[np.random.randint(num_transformations)]
+    points = np.empty((num_points, 2), dtype=np.float64)
+    t_count = transformations.shape[0]
+    for i in range(num_points):
+        idx = np.random.randint(t_count)
+        t = transformations[idx]
+        # Apply transformation
         x_new = t[0]*x + t[1]*y + t[2]
         y_new = t[3]*x + t[4]*y + t[5]
+
+        # Clamp coordinates to avoid overflow
+        if not (math.isfinite(x_new) and math.isfinite(y_new)):
+            return np.empty((0,2))
+        if abs(x_new)>1e6 or abs(y_new)>1e6:
+            return np.empty((0,2))
+
         x, y = x_new, y_new
-        points.append((x, y))
-    return np.array(points)
+        points[i,0] = x
+        points[i,1] = y
+    return points
 
-##########################################################
-# Safe Scaling and Feature Extraction
-##########################################################
-
-def safe_scale_points(points, max_grid=200):
-    if len(points) == 0:
-        return points
-    xs = points[:, 0]
-    ys = points[:, 1]
-
-    # Check for infinite or nan values
-    if not np.isfinite(xs).all() or not np.isfinite(ys).all():
-        return np.array([])
-
-    min_x, max_x = np.min(xs), np.max(xs)
-    min_y, max_y = np.min(ys), np.max(ys)
-    width = max_x - min_x + 1e-9
-    height = max_y - min_y + 1e-9
-
-    # If extremely large
-    if width > 1e9 or height > 1e9:
-        return np.array([])
-
-    xs_scaled = (xs - min_x)/width*(max_grid-1)
-    ys_scaled = (ys - min_y)/height*(max_grid-1)
-    return np.column_stack([xs_scaled, ys_scaled])
-
-def fractal_dimension(points_scaled, box_sizes=[1.0, 2.0, 4.0, 8.0], max_grid=200):
-    if len(points_scaled) == 0:
-        return 0.0
-    xs = points_scaled[:,0]
-    ys = points_scaled[:,1]
-
-    counts = []
-    sizes = []
-    for s in box_sizes:
-        s_scaled = max(1, s)
-        gx = min(max_grid, int(math.ceil((max_grid-1)/s_scaled)))
-        gy = min(max_grid, int(math.ceil((max_grid-1)/s_scaled)))
-
-        hist = np.zeros((gx, gy), dtype=np.float64)
-        for (X, Y) in zip(xs, ys):
-            ix = int(X//s_scaled)
-            iy = int(Y//s_scaled)
-            if 0 <= ix < gx and 0 <= iy < gy:
-                hist[ix, iy] = 1
-        N = np.sum(hist > 0)
-        counts.append(N)
-        sizes.append(s_scaled)
-
-    sizes = np.array(sizes)
-    counts = np.array(counts)
-    logN = np.log(counts+1e-9)
-    logS = np.log(1.0/sizes)
-    A = np.vstack([logS, np.ones(len(logS))]).T
-    m, c = np.linalg.lstsq(A, logN, rcond=None)[0]
-    return m
-
-def lacunarity(points_scaled, box_size=5.0, max_grid=200):
-    if len(points_scaled) == 0:
-        return 0.0
-    xs = points_scaled[:,0]
-    ys = points_scaled[:,1]
-
-    gx = max(1, min(max_grid, int((max_grid-1)/box_size)))
-    gy = max(1, min(max_grid, int((max_grid-1)/box_size)))
-    hist = np.zeros((gx, gy), dtype=np.float64)
-
-    for (X, Y) in zip(xs, ys):
-        ix = int(X//box_size)
-        iy = int(Y//box_size)
-        if 0 <= ix < gx and 0 <= iy < gy:
-            hist[ix, iy] += 1
-    mean_val = np.mean(hist)
-    var_val = np.var(hist)
-    if mean_val > 1e-9:
-        return var_val/(mean_val**2)
-    else:
-        return 0.0
-
+@njit
 def extract_features(points):
-    # Scale points to safe range
-    points_scaled = safe_scale_points(points, max_grid=200)
-    if len(points_scaled) == 0:
-        # Return a default feature vector if scaling failed
-        return np.zeros(12)
+    # Basic features: width, height, x_mean, y_mean, x_var, y_var, hull_area=0.0, num_points
+    # If invalid or too small, return zeros
+    if points.shape[0]<3:
+        return np.zeros(8, dtype=np.float64)
 
-    xs = points_scaled[:,0]
-    ys = points_scaled[:,1]
+    xs = points[:,0]
+    ys = points[:,1]
 
-    xmin, xmax = np.min(xs), np.max(xs)
-    ymin, ymax = np.min(ys), np.max(ys)
+    if not np.isfinite(xs).all() or not np.isfinite(ys).all():
+        return np.zeros(8, dtype=np.float64)
+
+    xmin = np.min(xs)
+    xmax = np.max(xs)
+    ymin = np.min(ys)
+    ymax = np.max(ys)
     width = xmax - xmin
     height = ymax - ymin
     x_mean = np.mean(xs)
     y_mean = np.mean(ys)
     x_var = np.var(xs)
     y_var = np.var(ys)
+    hull_area = 0.0  # Skipped for speed
 
-    try:
-        hull = ConvexHull(points_scaled)
-        hull_area = hull.area
-    except:
-        hull_area = 0.0
+    if not (math.isfinite(width) and math.isfinite(height) and math.isfinite(x_mean) and math.isfinite(y_mean) and math.isfinite(x_var) and math.isfinite(y_var)):
+        return np.zeros(8, dtype=np.float64)
 
-    fdim = fractal_dimension(points_scaled)
-    lac = lacunarity(points_scaled)
-
-    return np.array([width, height, x_mean, y_mean, x_var, y_var, hull_area, fdim, lac, len(points_scaled), np.mean(xs*ys), np.mean(np.abs(xs)+np.abs(ys))])
+    return np.array([width, height, x_mean, y_mean, x_var, y_var, hull_area, float(points.shape[0])], dtype=np.float64)
 
 ##########################################################
-# Genetic Programming
+# Genetic Programming Setup
 ##########################################################
 
 FUNCTIONS = [
@@ -173,18 +125,21 @@ def evaluate_expr(expr, meanX, stdX, varX):
         else:
             return float(expr)
     f = expr[0]
+    a1 = evaluate_expr(expr[1], meanX, stdX, varX)
+    if f in ['+', '-', '*']:
+        a2 = evaluate_expr(expr[2], meanX, stdX, varX)
     if f == '+':
-        return evaluate_expr(expr[1], meanX, stdX, varX) + evaluate_expr(expr[2], meanX, stdX, varX)
+        return a1+a2
     elif f == '-':
-        return evaluate_expr(expr[1], meanX, stdX, varX) - evaluate_expr(expr[2], meanX, stdX, varX)
+        return a1-a2
     elif f == '*':
-        return evaluate_expr(expr[1], meanX, stdX, varX) * evaluate_expr(expr[2], meanX, stdX, varX)
+        return a1*a2
     elif f == 'sin':
-        return math.sin(evaluate_expr(expr[1], meanX, stdX, varX))
+        return math.sin(a1)
     elif f == 'cos':
-        return math.cos(evaluate_expr(expr[1], meanX, stdX, varX))
+        return math.cos(a1)
     elif f == 'tanh':
-        return math.tanh(evaluate_expr(expr[1], meanX, stdX, varX))
+        return math.tanh(a1)
     return 0.0
 
 def random_subtree(expr):
@@ -230,7 +185,6 @@ def copy_expr(expr):
         return (expr[0], copy_expr(expr[1]), copy_expr(expr[2]))
 
 def generate_individual():
-    # 6 expressions for (a,b,c,d,e,f)
     return [generate_random_expr(3) for _ in range(6)]
 
 def copy_individual(ind):
@@ -251,9 +205,13 @@ def crossover_ind(ind1, ind2):
     ind2_new[j] = c2
     return ind1_new, ind2_new
 
-def evaluate_individual(ind, X_train, y_train, X_val, y_val, num_points=500):
-    train_sample_size = min(50, len(X_train))
-    val_sample_size = min(50, len(X_val))
+def clamp_params(params):
+    # Clamp parameters to avoid huge transformations
+    return np.clip(params, -PARAM_LIMIT, PARAM_LIMIT)
+
+def evaluate_individual(ind, X_train, y_train, X_val, y_val):
+    train_sample_size = min(30, len(X_train))
+    val_sample_size = min(30, len(X_val))
     idx_train = np.random.choice(len(X_train), train_sample_size, replace=False)
     idx_val = np.random.choice(len(X_val), val_sample_size, replace=False)
     X_train_s = X_train[idx_train]
@@ -261,31 +219,36 @@ def evaluate_individual(ind, X_train, y_train, X_val, y_val, num_points=500):
     X_val_s = X_val[idx_val]
     y_val_s = y_val[idx_val]
 
-    X_train_f = []
-    X_val_f = []
+    X_train_f = np.empty((train_sample_size, 8))
+    X_val_f = np.empty((val_sample_size, 8))
 
-    for X_ in X_train_s:
+    for i, X_ in enumerate(X_train_s):
         meanX = np.mean(X_)
         stdX = np.std(X_)+1e-9
         varX = np.var(X_)+1e-9
         params = [evaluate_expr(expr, meanX, stdX, varX) for expr in ind]
+        params = clamp_params(params)
         transformations = np.array(params).reshape(1,6)
-        points = generate_fractal_points(transformations, num_points=num_points, seed=0)
-        feats = extract_features(points)
-        X_train_f.append(feats)
+        points = generate_fractal_points(transformations, num_points=NUM_POINTS, seed=0)
+        feats = extract_features(points) if points.shape[0]>0 else np.zeros(8)
+        X_train_f[i] = feats
 
-    for X_ in X_val_s:
+    for i, X_ in enumerate(X_val_s):
         meanX = np.mean(X_)
         stdX = np.std(X_)+1e-9
         varX = np.var(X_)+1e-9
         params = [evaluate_expr(expr, meanX, stdX, varX) for expr in ind]
+        params = clamp_params(params)
         transformations = np.array(params).reshape(1,6)
-        points = generate_fractal_points(transformations, num_points=num_points, seed=0)
-        feats = extract_features(points)
-        X_val_f.append(feats)
+        points = generate_fractal_points(transformations, num_points=NUM_POINTS, seed=0)
+        feats = extract_features(points) if points.shape[0]>0 else np.zeros(8)
+        X_val_f[i] = feats
 
-    X_train_f = np.array(X_train_f)
-    X_val_f = np.array(X_val_f)
+    # Ensure no inf/NaN in features
+    if not np.isfinite(X_train_f).all():
+        X_train_f = np.nan_to_num(X_train_f, nan=0.0, posinf=0.0, neginf=0.0)
+    if not np.isfinite(X_val_f).all():
+        X_val_f = np.nan_to_num(X_val_f, nan=0.0, posinf=0.0, neginf=0.0)
 
     clf = KNeighborsClassifier(n_neighbors=3)
     clf.fit(X_train_f, y_train_s)
@@ -297,7 +260,7 @@ def tournament_selection(pop, fitnesses, k=3):
     selected.sort(key=lambda x:x[1], reverse=True)
     return selected[0][0]
 
-def run_evolution(X_train, y_train, X_val, y_val, pop_size=10, generations=5):
+def run_evolution(X_train, y_train, X_val, y_val, pop_size=POP_SIZE, generations=GENERATIONS):
     population = [generate_individual() for _ in range(pop_size)]
     fitnesses = [evaluate_individual(ind, X_train, y_train, X_val, y_val) for ind in population]
     best_fit = max(fitnesses)
@@ -329,29 +292,33 @@ def run_evolution(X_train, y_train, X_val, y_val, pop_size=10, generations=5):
     return best_ind, best_fit
 
 def final_evaluation(best_ind, X_trainval, y_trainval, X_test, y_test):
-    X_trainval_f = []
-    X_test_f = []
-    for X_ in X_trainval:
+    X_trainval_f = np.empty((len(X_trainval), 8))
+    X_test_f = np.empty((len(X_test), 8))
+    for i, X_ in enumerate(X_trainval):
         meanX = np.mean(X_)
         stdX = np.std(X_)+1e-9
         varX = np.var(X_)+1e-9
         params = [evaluate_expr(expr, meanX, stdX, varX) for expr in best_ind]
+        params = clamp_params(params)
         transformations = np.array(params).reshape(1,6)
-        points = generate_fractal_points(transformations, num_points=500, seed=0)
-        feats = extract_features(points)
-        X_trainval_f.append(feats)
-    for X_ in X_test:
-        meanX = np.mean(X_)
-        stdX = np.std(X_)+1e-9
-        varX = np.var(X_)+1e-9
-        params = [evaluate_expr(expr, meanX, stdX, varX) for expr in best_ind]
-        transformations = np.array(params).reshape(1,6)
-        points = generate_fractal_points(transformations, num_points=500, seed=0)
-        feats = extract_features(points)
-        X_test_f.append(feats)
+        points = generate_fractal_points(transformations, num_points=NUM_POINTS, seed=0)
+        feats = extract_features(points) if points.shape[0]>0 else np.zeros(8)
+        X_trainval_f[i] = feats
 
-    X_trainval_f = np.array(X_trainval_f)
-    X_test_f = np.array(X_test_f)
+    for i, X_ in enumerate(X_test):
+        meanX = np.mean(X_)
+        stdX = np.std(X_)+1e-9
+        varX = np.var(X_)+1e-9
+        params = [evaluate_expr(expr, meanX, stdX, varX) for expr in best_ind]
+        params = clamp_params(params)
+        transformations = np.array(params).reshape(1,6)
+        points = generate_fractal_points(transformations, num_points=NUM_POINTS, seed=0)
+        feats = extract_features(points) if points.shape[0]>0 else np.zeros(8)
+        X_test_f[i] = feats
+
+    # Replace inf/nan with zero
+    X_trainval_f = np.nan_to_num(X_trainval_f, nan=0.0, posinf=0.0, neginf=0.0)
+    X_test_f = np.nan_to_num(X_test_f, nan=0.0, posinf=0.0, neginf=0.0)
 
     clf = KNeighborsClassifier(n_neighbors=5)
     clf.fit(X_trainval_f, y_trainval)
@@ -369,7 +336,7 @@ def test_on_dataset_fi(name: str, X: np.ndarray, y: np.ndarray):
     X_test = scaler.transform(X_test)
 
     start_time = time.time()
-    best_ind, best_fit = run_evolution(X_train, y_train, X_val, y_val, pop_size=10, generations=5)
+    best_ind, best_fit = run_evolution(X_train, y_train, X_val, y_val)
     train_time = time.time() - start_time
 
     start_time = time.time()
@@ -406,7 +373,6 @@ def run_experiments_fi():
     print("=" * 80)
     fi_results_df = pd.DataFrame(fi_results)
     print(fi_results_df.to_string(index=False))
-
 
 if __name__ == "__main__":
     run_experiments_fi()
