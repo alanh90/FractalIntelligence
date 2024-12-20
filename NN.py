@@ -1,3 +1,16 @@
+'''
+================================================================================
+SUMMARY OF NN RESULTS
+================================================================================
+      Dataset  NN Balanced Accuracy  NN Training Time (s)  NN Prediction Time (s)
+        Moons              0.990000                0.4313                   0.001
+      Circles              0.890000                0.2153                   0.001
+       Digits              0.974683                0.4992                   0.001
+         Iris              0.966667                0.0846                   0.000
+Breast Cancer              0.967262                0.1998                   0.000
+         Wine              0.966667                0.0621                   0.000
+'''
+
 import numpy as np
 import time
 from sklearn.datasets import make_moons, make_circles, load_digits, load_iris, load_breast_cancer, load_wine

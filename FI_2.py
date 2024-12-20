@@ -1,3 +1,16 @@
+'''
+================================================================================
+SUMMARY OF FI RESULTS
+================================================================================
+      Dataset  FI Balanced Accuracy  FI Total Training Time (s)  FI Prediction Time (s)
+        Moons              0.785000                      0.1465                  0.2031
+      Circles              0.855000                      0.1500                  0.0095
+       Digits              0.661366                      0.4374                  0.0205
+         Iris              0.733333                      0.0853                  0.0085
+Breast Cancer              0.912698                      0.1035                  0.0098
+         Wine              0.610317                      0.0825                  0.0070
+'''
+
 import numpy as np
 import time
 from sklearn.datasets import make_moons, make_circles, load_digits, load_iris, load_breast_cancer, load_wine
