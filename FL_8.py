@@ -435,3 +435,34 @@ def run_experiment_breast_cancer():
 
 if __name__ == "__main__":
     run_experiment_breast_cancer()
+
+'''
+Output:
+
+===== Loading Breast Cancer Dataset =====
+Dataset shape: (569, 30), classes=[0 1]
+Training class distribution: {np.int64(0): np.int64(148), np.int64(1): np.int64(250)}
+  Class 0: 148 samples, label dist: (array([0]), array([148]))
+  [Init] best fitness = 0.0000
+  [Gen 1] best fitness = 0.0000
+  [Gen 2] best fitness = 0.0000
+  [Gen 3] best fitness = 0.0000
+  [Gen 4] best fitness = 0.0000
+  [Gen 5] best fitness = 0.0000
+  => Final best fractal fitness for class 0: 0.0000
+  Class 1: 250 samples, label dist: (array([1]), array([250]))
+  [Init] best fitness = 0.0000
+  [Gen 1] best fitness = 0.0000
+  [Gen 2] best fitness = 0.0000
+  [Gen 3] best fitness = 0.0000
+  [Gen 4] best fitness = 0.0000
+  [Gen 5] best fitness = 0.0000
+  => Final best fractal fitness for class 1: 0.0000
+
+Fractal fit time = 0.4786s
+Transform time = 0.0654s
+Classifier train time = 0.0010s
+Predict time = 0.2189s
+Balanced Accuracy = 0.9079
+Total training time = 0.5449s, Prediction time = 0.2189s
+'''
