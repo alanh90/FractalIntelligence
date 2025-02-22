@@ -12,71 +12,39 @@
 
 ## Experimental Results
 
-The algorithm was compared with several fast-learning models on standard datasets (Iris, Wine, and Breast Cancer):
+The algorithm was compared with several fast-learning models on standard datasets (Iris, Wine, and Breast Cancer). The following results represent the average performance:
 
-### Iris Dataset
+### Iris Dataset Comparison
 - **MandalaNet:** 0.0010 s, **100% Accuracy**
 - **Decision Tree:** 0.0010 s, 100% Accuracy
-- **Random Forest:** 0.0543 s, 100% Accuracy
+- **Random Forest:** 0.0530 s, 100% Accuracy
 - **Logistic Regression:** 0.0020 s, 100% Accuracy
 - **SVC:** 0.0010 s, 100% Accuracy
+- **MLPClassifier:** 0.0976 s, 100% Accuracy
+- **KNN:** 0.0000 s, 100% Accuracy
 
-### Wine Dataset
+### Wine Dataset Comparison
 - **MandalaNet:** 0.0010 s, **100% Accuracy**
 - **Decision Tree:** 0.0010 s, 94.44% Accuracy
-- **Random Forest:** 0.0559 s, 100% Accuracy
-- **Logistic Regression:** 0.0016 s, 100% Accuracy
-- **SVC:** 0.0000 s, 100% Accuracy
+- **Random Forest:** 0.0565 s, 100% Accuracy
+- **Logistic Regression:** 0.0020 s, 100% Accuracy
+- **SVC:** 0.0010 s, 100% Accuracy
+- **MLPClassifier:** 0.0766 s, 100% Accuracy
+- **KNN:** 0.0009 s, 94.44% Accuracy
 
-### Breast Cancer Dataset
+### Breast Cancer Dataset Comparison
 - **MandalaNet:** 0.0020 s, **100% Accuracy**
-- **Decision Tree:** 0.0070 s, 94.74% Accuracy
-- **Random Forest:** 0.0981 s, 96.49% Accuracy
-- **Logistic Regression:** 0.0053 s, 97.37% Accuracy
+- **Decision Tree:** 0.0050 s, 94.74% Accuracy
+- **Random Forest:** 0.0992 s, 96.49% Accuracy
+- **Logistic Regression:** 0.0049 s, 97.37% Accuracy
 - **SVC:** 0.0020 s, 98.25% Accuracy
+- **MLPClassifier:** 1.4802 s, 97.37% Accuracy
+- **KNN:** 0.0000 s, 94.74% Accuracy
 
 *Note: Results on these small, well-known benchmarks are extremely promising. MandalaNet shows ultra-fast training times with perfect accuracy on the Iris and Wine datasets, and competitive performance on the Breast Cancer dataset.*
 
 ## Graphical Results
 
-The following Python snippet uses Matplotlib to generate bar graphs comparing training time and accuracy for each dataset:
+The following figure shows bar graphs comparing training time (on a logarithmic scale) and accuracy across datasets:
 
-```python
-import matplotlib.pyplot as plt
-
-# Define the datasets and model names.
-datasets = ['Iris', 'Wine', 'Breast Cancer']
-models = ['MandalaNet', 'Decision Tree', 'Random Forest', 'Logistic Regression', 'SVC']
-
-# Training times (in seconds) for each dataset.
-train_times = {
-    'Iris': [0.0010, 0.0010, 0.0543, 0.0020, 0.0010],
-    'Wine': [0.0010, 0.0010, 0.0559, 0.0016, 0.0000],
-    'Breast Cancer': [0.0020, 0.0070, 0.0981, 0.0053, 0.0020]
-}
-
-# Accuracies for each dataset.
-accuracies = {
-    'Iris': [1.0, 1.0, 1.0, 1.0, 1.0],
-    'Wine': [1.0, 0.9444, 1.0, 1.0, 1.0],
-    'Breast Cancer': [1.0, 0.9474, 0.9649, 0.9737, 0.9825]
-}
-
-fig, axes = plt.subplots(2, 3, figsize=(15, 8))
-for i, ds in enumerate(datasets):
-    # Plot Training Times.
-    ax_time = axes[0, i]
-    ax_time.bar(models, train_times[ds], color='skyblue')
-    ax_time.set_title(f'{ds} - Train Time (s)')
-    ax_time.set_ylim(0, max(train_times[ds])*1.5)
-    ax_time.tick_params(axis='x', rotation=45)
-    
-    # Plot Accuracies.
-    ax_acc = axes[1, i]
-    ax_acc.bar(models, accuracies[ds], color='lightgreen')
-    ax_acc.set_title(f'{ds} - Accuracy')
-    ax_acc.set_ylim(0, 1.1)
-    ax_acc.tick_params(axis='x', rotation=45)
-
-plt.tight_layout()
-plt.show()
+![Comparison Data](media/ComparisonData.png)

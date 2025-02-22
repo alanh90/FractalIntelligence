@@ -8,9 +8,11 @@ import time
 
 # Additional classifiers from scikit-learn
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
+from sklearn.neural_network import MLPClassifier
+from sklearn.neighbors import KNeighborsClassifier
 
 # --- Mandala Fractal Node and Network --- #
 class MandalaFractalNode:
@@ -227,6 +229,26 @@ def evaluate_models(dataset_name):
     acc = accuracy_score(y_test, y_pred)
     models["SVC"] = svc
     results["SVC"] = {"train_time": train_time, "accuracy": acc}
+
+    # --- 6. MLP Neural Network --- #
+    mlp = MLPClassifier(hidden_layer_sizes=(50,), max_iter=1000, random_state=42)
+    start = time.time()
+    mlp.fit(X_train, y_train)
+    train_time = time.time() - start
+    y_pred = mlp.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    models["MLPClassifier"] = mlp
+    results["MLPClassifier"] = {"train_time": train_time, "accuracy": acc}
+
+    # --- 7. K-Nearest Neighbors --- #
+    knn = KNeighborsClassifier()
+    start = time.time()
+    knn.fit(X_train, y_train)
+    train_time = time.time() - start
+    y_pred = knn.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    models["KNN"] = knn
+    results["KNN"] = {"train_time": train_time, "accuracy": acc}
 
     # Print side-by-side results.
     print(f"\n--- {dataset_name} Dataset Comparison ---")
