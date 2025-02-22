@@ -1,5 +1,7 @@
 # MandalaNet
 
+***I created this based on gut intuition + help from almost every top AI model out there. Enjoy!***
+
 ## Overview
 
 **MandalaNet** is an innovative, fractal-inspired adaptive learning algorithm designed as an alternative to traditional neural networks. Drawing inspiration from concepts such as mandala fractals, flow dynamics, and adaptive “box” representations, this approach starts with a single abstract "box" that encodes the entire data space and recursively subdivides it into radially symmetric child nodes. Each node adapts locally using simple momentum-based updates and “liquid splitting” when error thresholds are exceeded—all without relying on global backpropagation.
