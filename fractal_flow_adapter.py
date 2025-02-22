@@ -1,32 +1,33 @@
 import numpy as np
 from collections import Counter
 from sklearn.decomposition import PCA
+from sklearn.cluster import KMeans
 from sklearn.datasets import load_iris, load_wine, load_breast_cancer
-from sklearn.model_selection import train_test_split
+from sklearn.model_counts_split import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense
-from tensorflow.keras.utils import to_categorical
 import time
 
-# FFNNode class
+# FFNNode class with evolution capabilities
 class FFNNode:
-    def __init__(self, center, radius, value=None):
+    def __init__(self, center, radius, value=None, fractal_dim=0.0):
         self.center = center
         self.radius = radius
         self.children = []
         self.value = value
+        self.fractal_dim = fractal_dim  # Local fractal dimension estimate
+        self.error_count = 0  # Track mispredictions for feedback
 
     def is_leaf(self):
         return len(self.children) == 0 and self.value is not None
 
-# FractalFlowNetwork class
+# Enhanced FractalFlowNetwork with liquid evolution and fractal feedback
 class FractalFlowNetwork:
-    def __init__(self, max_depth=5, min_samples_split=5, n_splits=2):
+    def __init__(self, max_depth=5, min_samples_split=5, max_splits=4, adapt_threshold=0.1):
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
-        self.n_splits = n_splits
+        self.max_splits = max_splits
+        self.adapt_threshold = adapt_threshold  # Threshold for inference-time adaptation
         self.root = None
 
     def fit(self, X, y):
@@ -40,117 +41,151 @@ class FractalFlowNetwork:
         ps = hist / len(y)
         return -np.sum([p * np.log2(p) for p in ps if p > 0])
 
-    def _grow_network(self, X, y, node, depth):
-        if (len(y) < self.min_samples_split or
-            depth >= self.max_depth or
-            self._entropy(y) < 0.1):
-            node.value = Counter(y).most_common(1)[0][0]
-            return
+    def _estimate_fractal_dim(self, X):
+        """Simple box-counting proxy using variance across dimensions."""
+        if len(X) < 2:
+            return 1.0
+        scales = [0.1, 0.5, 1.0]  # Different grid sizes
+        counts = []
+        for scale in scales:
+            bins = np.ceil((np.max(X, axis=0) - np.min(X, axis=0)) / scale).astype(int)
+            hist, _ = np.histogramdd(X, bins=bins)
+            counts.append(np.sum(hist > 0))
+        counts = np.log(counts + 1)  # Avoid log(0)
+        scales = np.log(1 / np.array(scales))
+        if np.std(counts) == 0:
+            return 1.0
+        return np.polyfit(scales, counts, 1)[0]  # Slope as fractal dim estimate
 
-        if X.shape[0] > 1 and X.shape[1] > 1:
-            pca = PCA(n_components=1)
-            pca.fit(X)
-            direction = pca.components_[0]
+    def _decide_splits(self, y, X):
+        """Decide splits based on entropy and fractal dimension."""
+        unique_classes = len(np.unique(y))
+        if unique_classes <= 1:
+            return 1
+        max_entropy = np.log2(unique_classes)
+        entropy = self._entropy(y)
+        norm_entropy = entropy / max_entropy if max_entropy > 0 else 0
+        fractal_dim = self._estimate_fractal_dim(X)
+
+        # Combine entropy and fractal dimension
+        complexity = norm_entropy * (fractal_dim / X.shape[1])  # Normalize by dims
+        if complexity < 0.1:
+            return 1
+        elif complexity < 0.4:
+            return 2
+        elif complexity < 0.7:
+            return 3
         else:
-            direction = np.random.randn(X.shape[1])
-            direction /= np.linalg.norm(direction)
+            return min(self.max_splits, int(np.ceil(fractal_dim)))
 
-        projections = np.dot(X - node.center, direction)
-        median_proj = np.median(projections)
+    def _grow_network(self, X, y, node, depth):
+        if len(y) < self.min_samples_split or depth >= self.max_depth:
+            node.value = Counter(y).most_common(1)[0][0] if len(y) > 0 else 0
+            return
 
-        left_idx = projections <= median_proj
-        right_idx = projections > median_proj
-
-        if np.sum(left_idx) == 0 or np.sum(right_idx) == 0:
+        k = self._decide_splits(y, X)
+        node.fractal_dim = self._estimate_fractal_dim(X)
+        if k == 1:
             node.value = Counter(y).most_common(1)[0][0]
             return
 
-        left_center = node.center + direction * (median_proj - node.radius)
-        right_center = node.center + direction * (median_proj + node.radius)
-        child_radius = node.radius / 2
+        # PCA and k-means for splitting
+        if X.shape[0] > k and X.shape[1] > 1:
+            pca = PCA(n_components=min(k-1, X.shape[1]))
+            X_proj = pca.fit_transform(X)
+        else:
+            X_proj = X
 
-        left_child = FFNNode(left_center, child_radius)
-        right_child = FFNNode(right_center, child_radius)
-        node.children = [left_child, right_child]
+        kmeans = KMeans(n_clusters=k, random_state=0).fit(X_proj)
+        labels = kmeans.labels_
 
-        self._grow_network(X[left_idx], y[left_idx], left_child, depth + 1)
-        self._grow_network(X[right_idx], y[right_idx], right_child, depth + 1)
+        child_radius = node.radius / np.sqrt(k)  # Adjust radius dynamically
+        for i in range(k):
+            cluster_idx = labels == i
+            if np.sum(cluster_idx) == 0:
+                continue
+            child_data = X[cluster_idx]
+            child_y = y[cluster_idx]
+            child_center = np.mean(child_data, axis=0)
+            child_node = FFNNode(child_center, child_radius)
+            node.children.append(child_node)
+            self._grow_network(child_data, child_y, child_node, depth + 1)
 
-        for child in node.children:
-            if child.children:
-                child_data = X[np.linalg.norm(X - child.center, axis=1) <= child.radius]
-                if len(child_data) > 0:
-                    child.center = np.mean(child_data, axis=0)
+        if not node.children:
+            node.value = Counter(y).most_common(1)[0][0]
 
-    def predict(self, X):
-        return np.array([self._traverse_network(x, self.root) for x in X])
+    def predict(self, X, y=None, adapt=False):
+        """Predict with optional adaptation based on feedback."""
+        preds = []
+        for i, x in enumerate(X):
+            pred = self._traverse_network(x, self.root, adapt=adapt, true_label=y[i] if y is not None else None)
+            preds.append(pred)
+        return np.array(preds)
 
-    def _traverse_network(self, x, node):
+    def _traverse_network(self, x, node, adapt=False, true_label=None):
         if node.is_leaf():
+            if adapt and true_label is not None and node.value != true_label:
+                node.error_count += 1
+                if node.error_count / 10 > self.adapt_threshold:  # Trigger adaptation
+                    self._adapt_node(node, x, true_label)
             return node.value
+
         distances = [np.linalg.norm(x - child.center) for child in node.children]
-        closest_child = node.children[np.argmin(distances)]
-        return self._traverse_network(x, closest_child)
+        closest_idx = np.argmin(distances)
+        closest_child = node.children[closest_idx]
 
-# Function to build a simple neural network
-def build_neural_network(input_shape, num_classes):
-    model = Sequential([
-        Dense(16, activation='relu', input_shape=(input_shape,)),
-        Dense(num_classes, activation='softmax')
-    ])
-    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
-    return model
+        if adapt and true_label is not None:
+            pred = self._traverse_network(x, closest_child, adapt=False)
+            if pred != true_label:
+                node.error_count += 1
+                if node.error_count / 10 > self.adapt_threshold:
+                    self._liquid_split(node, x, true_label)
+        return self._traverse_network(x, closest_child, adapt=adapt, true_label=true_label)
 
-# Function to evaluate a model on a dataset
-def evaluate_model(model, X_train, y_train, X_test, y_test, is_ffn=True):
+    def _liquid_split(self, node, x, true_label):
+        """Add a new child node dynamically during inference."""
+        if len(node.children) >= self.max_splits:
+            return
+        new_center = x  # Position new node at the misclassified point
+        new_radius = node.radius / 2
+        new_node = FFNNode(new_center, new_radius, value=true_label)
+        node.children.append(new_node)
+        node.error_count = 0  # Reset error count
+
+    def _adapt_node(self, node, x, true_label):
+        """Adjust leaf node based on feedback."""
+        node.center = 0.9 * node.center + 0.1 * x  # Gradual shift toward new data
+        node.value = true_label  # Update value
+        node.error_count = 0
+
+# Evaluate the enhanced FFN
+def evaluate_ffn(dataset_name):
+    dataset_loaders = {
+        "Iris": load_iris,
+        "Wine": load_wine,
+        "Breast Cancer": load_breast_cancer
+    }
+    dataset = dataset_loaders[dataset_name]()
+    X, y = dataset.data, dataset.target
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
+
+    ffn = FractalFlowNetwork(max_depth=5, min_samples_split=5, max_splits=4, adapt_threshold=0.1)
     start_time = time.time()
-    if is_ffn:
-        model.fit(X_train, y_train)
-    else:
-        y_train_cat = to_categorical(y_train)
-        model.fit(X_train, y_train_cat, epochs=50, verbose=0)
+    ffn.fit(X_train, y_train)
     train_time = time.time() - start_time
 
-    if is_ffn:
-        y_pred = model.predict(X_test)
-    else:
-        y_pred = np.argmax(model.predict(X_test, verbose=0), axis=1)
+    # Predict with adaptation
+    y_pred = ffn.predict(X_test, y_test, adapt=True)
     accuracy = accuracy_score(y_test, y_pred)
 
-    return train_time, accuracy
-
-# Main function to compare FFN and NN on multiple datasets
-def compare_on_datasets():
-    datasets = {
-        "Iris": load_iris(),
-        "Wine": load_wine(),
-        "Breast Cancer": load_breast_cancer()
-    }
-
-    for name, dataset in datasets.items():
-        print(f"\n--- {name} Dataset ---")
-        X, y = dataset.data, dataset.target
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-        # Standardize features
-        scaler = StandardScaler()
-        X_train = scaler.fit_transform(X_train)
-        X_test = scaler.transform(X_test)
-
-        # Train and evaluate FFN
-        ffn = FractalFlowNetwork(max_depth=5, min_samples_split=5, n_splits=2)
-        ffn_time, ffn_accuracy = evaluate_model(ffn, X_train, y_train, X_test, y_test, is_ffn=True)
-
-        # Train and evaluate Neural Network
-        num_classes = len(np.unique(y))
-        nn_model = build_neural_network(X_train.shape[1], num_classes)
-        nn_time, nn_accuracy = evaluate_model(nn_model, X_train, y_train, X_test, y_test, is_ffn=False)
-
-        # Print results
-        print(f"FFN Training Time: {ffn_time:.4f} seconds")
-        print(f"FFN Accuracy: {ffn_accuracy:.4f}")
-        print(f"Neural Network Training Time: {nn_time:.4f} seconds")
-        print(f"Neural Network Accuracy: {nn_accuracy:.4f}")
+    print(f"\n--- {dataset_name} Dataset ---")
+    print(f"FFN Training Time: {train_time:.4f} seconds")
+    print(f"FFN Accuracy with Adaptation: {accuracy:.4f}")
 
 if __name__ == "__main__":
-    compare_on_datasets()
+    for dataset in ["Iris", "Wine", "Breast Cancer"]:
+        evaluate_ffn(dataset)
