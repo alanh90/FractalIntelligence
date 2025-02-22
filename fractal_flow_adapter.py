@@ -1,14 +1,16 @@
 import numpy as np
 from collections import Counter
 from sklearn.decomposition import PCA
-from sklearn.cluster import KMeans
 from sklearn.datasets import load_iris, load_wine, load_breast_cancer
-from sklearn.model_counts_split import train_test_split
+from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
+from scipy.spatial.distance import pdist  # For correlation dimension
 import time
+from sklearn.cluster import KMeans
 
-# FFNNode class with evolution capabilities
+
+# Node class for the Fractal Flow Network
 class FFNNode:
     def __init__(self, center, radius, value=None, fractal_dim=0.0):
         self.center = center
@@ -21,7 +23,8 @@ class FFNNode:
     def is_leaf(self):
         return len(self.children) == 0 and self.value is not None
 
-# Enhanced FractalFlowNetwork with liquid evolution and fractal feedback
+
+# Fractal Flow Network class
 class FractalFlowNetwork:
     def __init__(self, max_depth=5, min_samples_split=5, max_splits=4, adapt_threshold=0.1):
         self.max_depth = max_depth
@@ -42,23 +45,30 @@ class FractalFlowNetwork:
         return -np.sum([p * np.log2(p) for p in ps if p > 0])
 
     def _estimate_fractal_dim(self, X):
-        """Simple box-counting proxy using variance across dimensions."""
+        """
+        Estimate the fractal dimension using the correlation dimension approximation.
+
+        Parameters:
+        - X: numpy array of shape (n_samples, n_features), input data.
+
+        Returns:
+        - float: Estimated correlation dimension.
+        """
         if len(X) < 2:
             return 1.0
-        scales = [0.1, 0.5, 1.0]  # Different grid sizes
-        counts = []
-        for scale in scales:
-            bins = np.ceil((np.max(X, axis=0) - np.min(X, axis=0)) / scale).astype(int)
-            hist, _ = np.histogramdd(X, bins=bins)
-            counts.append(np.sum(hist > 0))
-        counts = np.log(counts + 1)  # Avoid log(0)
-        scales = np.log(1 / np.array(scales))
-        if np.std(counts) == 0:
+        distances = pdist(X)
+        if np.max(distances) == 0:
             return 1.0
-        return np.polyfit(scales, counts, 1)[0]  # Slope as fractal dim estimate
+        r_values = np.percentile(distances, np.linspace(10, 90, 9)) + 1e-10
+        C_r = [np.mean(distances < r) for r in r_values]
+        C_r = np.array(C_r)
+        C_r = np.maximum(C_r, 1e-10)
+        log_r = np.log(r_values)
+        log_C_r = np.log(C_r)
+        slope, _ = np.polyfit(log_r, log_C_r, 1)
+        return slope
 
     def _decide_splits(self, y, X):
-        """Decide splits based on entropy and fractal dimension."""
         unique_classes = len(np.unique(y))
         if unique_classes <= 1:
             return 1
@@ -66,9 +76,7 @@ class FractalFlowNetwork:
         entropy = self._entropy(y)
         norm_entropy = entropy / max_entropy if max_entropy > 0 else 0
         fractal_dim = self._estimate_fractal_dim(X)
-
-        # Combine entropy and fractal dimension
-        complexity = norm_entropy * (fractal_dim / X.shape[1])  # Normalize by dims
+        complexity = norm_entropy * (fractal_dim / X.shape[1])
         if complexity < 0.1:
             return 1
         elif complexity < 0.4:
@@ -89,9 +97,8 @@ class FractalFlowNetwork:
             node.value = Counter(y).most_common(1)[0][0]
             return
 
-        # PCA and k-means for splitting
         if X.shape[0] > k and X.shape[1] > 1:
-            pca = PCA(n_components=min(k-1, X.shape[1]))
+            pca = PCA(n_components=min(k - 1, X.shape[1]))
             X_proj = pca.fit_transform(X)
         else:
             X_proj = X
@@ -99,7 +106,7 @@ class FractalFlowNetwork:
         kmeans = KMeans(n_clusters=k, random_state=0).fit(X_proj)
         labels = kmeans.labels_
 
-        child_radius = node.radius / np.sqrt(k)  # Adjust radius dynamically
+        child_radius = node.radius / np.sqrt(k)
         for i in range(k):
             cluster_idx = labels == i
             if np.sum(cluster_idx) == 0:
@@ -115,10 +122,10 @@ class FractalFlowNetwork:
             node.value = Counter(y).most_common(1)[0][0]
 
     def predict(self, X, y=None, adapt=False):
-        """Predict with optional adaptation based on feedback."""
         preds = []
         for i, x in enumerate(X):
-            pred = self._traverse_network(x, self.root, adapt=adapt, true_label=y[i] if y is not None else None)
+            pred = self._traverse_network(x, self.root, adapt=adapt,
+                                          true_label=y[i] if y is not None else None)
             preds.append(pred)
         return np.array(preds)
 
@@ -126,7 +133,7 @@ class FractalFlowNetwork:
         if node.is_leaf():
             if adapt and true_label is not None and node.value != true_label:
                 node.error_count += 1
-                if node.error_count / 10 > self.adapt_threshold:  # Trigger adaptation
+                if node.error_count / 10 > self.adapt_threshold:
                     self._adapt_node(node, x, true_label)
             return node.value
 
@@ -143,22 +150,21 @@ class FractalFlowNetwork:
         return self._traverse_network(x, closest_child, adapt=adapt, true_label=true_label)
 
     def _liquid_split(self, node, x, true_label):
-        """Add a new child node dynamically during inference."""
         if len(node.children) >= self.max_splits:
             return
-        new_center = x  # Position new node at the misclassified point
+        new_center = x
         new_radius = node.radius / 2
         new_node = FFNNode(new_center, new_radius, value=true_label)
         node.children.append(new_node)
-        node.error_count = 0  # Reset error count
-
-    def _adapt_node(self, node, x, true_label):
-        """Adjust leaf node based on feedback."""
-        node.center = 0.9 * node.center + 0.1 * x  # Gradual shift toward new data
-        node.value = true_label  # Update value
         node.error_count = 0
 
-# Evaluate the enhanced FFN
+    def _adapt_node(self, node, x, true_label):
+        node.center = 0.9 * node.center + 0.1 * x
+        node.value = true_label
+        node.error_count = 0
+
+
+# Evaluate the FFN on multiple datasets
 def evaluate_ffn(dataset_name):
     dataset_loaders = {
         "Iris": load_iris,
@@ -178,13 +184,13 @@ def evaluate_ffn(dataset_name):
     ffn.fit(X_train, y_train)
     train_time = time.time() - start_time
 
-    # Predict with adaptation
     y_pred = ffn.predict(X_test, y_test, adapt=True)
     accuracy = accuracy_score(y_test, y_pred)
 
     print(f"\n--- {dataset_name} Dataset ---")
     print(f"FFN Training Time: {train_time:.4f} seconds")
     print(f"FFN Accuracy with Adaptation: {accuracy:.4f}")
+
 
 if __name__ == "__main__":
     for dataset in ["Iris", "Wine", "Breast Cancer"]:
