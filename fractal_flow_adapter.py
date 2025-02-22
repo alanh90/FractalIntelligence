@@ -5,12 +5,18 @@ from sklearn.datasets import load_iris, load_wine, load_breast_cancer
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
-from scipy.spatial.distance import pdist  # For correlation dimension
+from scipy.spatial.distance import pdist
 import time
 from sklearn.cluster import KMeans
 
+# Additional classifiers from scikit-learn
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
 
-# Node class for the Fractal Flow Network
+
+# --- Custom FractalFlowNet (FFN) --- #
 class FFNNode:
     def __init__(self, center, radius, value=None, fractal_dim=0.0):
         self.center = center
@@ -18,22 +24,34 @@ class FFNNode:
         self.children = []
         self.value = value
         self.fractal_dim = fractal_dim  # Local fractal dimension estimate
-        self.error_count = 0  # Track mispredictions for feedback
+        self.error_count = 0          # Track local mispredictions for adaptation
 
     def is_leaf(self):
         return len(self.children) == 0 and self.value is not None
 
 
-# Fractal Flow Network class
-class FractalFlowNetwork:
-    def __init__(self, max_depth=5, min_samples_split=5, max_splits=4, adapt_threshold=0.1):
+class FractalFlowNet:
+    def __init__(self, max_depth=5, min_samples_split=5, max_splits=4,
+                 adapt_threshold=0.1, momentum=0.9, flow_temp=1.0):
+        """
+        Parameters:
+         - max_depth: Maximum recursion depth for network growth.
+         - min_samples_split: Minimum number of samples to attempt a split.
+         - max_splits: Maximum number of child nodes a node can split into.
+         - adapt_threshold: Error ratio threshold to trigger local adaptation.
+         - momentum: Controls how much a node’s center is updated during adaptation.
+         - flow_temp: Temperature parameter controlling the softness of flow weights.
+        """
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.max_splits = max_splits
-        self.adapt_threshold = adapt_threshold  # Threshold for inference-time adaptation
+        self.adapt_threshold = adapt_threshold
+        self.momentum = momentum
+        self.flow_temp = flow_temp
         self.root = None
 
     def fit(self, X, y):
+        # Initialize with a single seed node (global mean and radius)
         center = np.mean(X, axis=0)
         radius = np.max(np.linalg.norm(X - center, axis=1))
         self.root = FFNNode(center, radius)
@@ -46,13 +64,7 @@ class FractalFlowNetwork:
 
     def _estimate_fractal_dim(self, X):
         """
-        Estimate the fractal dimension using the correlation dimension approximation.
-
-        Parameters:
-        - X: numpy array of shape (n_samples, n_features), input data.
-
-        Returns:
-        - float: Estimated correlation dimension.
+        Estimate the fractal dimension using a correlation dimension approximation.
         """
         if len(X) < 2:
             return 1.0
@@ -97,6 +109,7 @@ class FractalFlowNetwork:
             node.value = Counter(y).most_common(1)[0][0]
             return
 
+        # Optionally reduce dimensionality via PCA for clustering efficiency
         if X.shape[0] > k and X.shape[1] > 1:
             pca = PCA(n_components=min(k - 1, X.shape[1]))
             X_proj = pca.fit_transform(X)
@@ -105,8 +118,8 @@ class FractalFlowNetwork:
 
         kmeans = KMeans(n_clusters=k, random_state=0).fit(X_proj)
         labels = kmeans.labels_
-
         child_radius = node.radius / np.sqrt(k)
+
         for i in range(k):
             cluster_idx = labels == i
             if np.sum(cluster_idx) == 0:
@@ -121,6 +134,39 @@ class FractalFlowNetwork:
         if not node.children:
             node.value = Counter(y).most_common(1)[0][0]
 
+    def _compute_flow_weights(self, x, children):
+        # Compute distances from x to each child's center
+        distances = np.array([np.linalg.norm(x - child.center) for child in children])
+        # Softmax weighting with flow temperature
+        weights = np.exp(-distances / self.flow_temp)
+        if np.sum(weights) == 0:
+            weights = np.ones_like(weights)
+        else:
+            weights = weights / np.sum(weights)
+        return weights
+
+    def _traverse_network(self, x, node, adapt=False, true_label=None):
+        if node.is_leaf():
+            if adapt and true_label is not None and node.value != true_label:
+                node.error_count += 1
+                if node.error_count / (len(node.children) + 1) > self.adapt_threshold:
+                    self._adapt_node(node, x, true_label)
+            return node.value
+
+        # Compute flow weights and choose the child with the highest weight
+        weights = self._compute_flow_weights(x, node.children)
+        chosen_idx = np.argmax(weights)
+        chosen_child = node.children[chosen_idx]
+
+        # Check for adaptation: if prediction from chosen branch is off, perform liquid splitting
+        if adapt and true_label is not None:
+            pred = self._traverse_network(x, chosen_child, adapt=False)
+            if pred != true_label:
+                node.error_count += 1
+                if node.error_count / (len(node.children) + 1) > self.adapt_threshold:
+                    self._liquid_split(node, x, true_label)
+        return self._traverse_network(x, chosen_child, adapt=adapt, true_label=true_label)
+
     def predict(self, X, y=None, adapt=False):
         preds = []
         for i, x in enumerate(X):
@@ -129,27 +175,8 @@ class FractalFlowNetwork:
             preds.append(pred)
         return np.array(preds)
 
-    def _traverse_network(self, x, node, adapt=False, true_label=None):
-        if node.is_leaf():
-            if adapt and true_label is not None and node.value != true_label:
-                node.error_count += 1
-                if node.error_count / 10 > self.adapt_threshold:
-                    self._adapt_node(node, x, true_label)
-            return node.value
-
-        distances = [np.linalg.norm(x - child.center) for child in node.children]
-        closest_idx = np.argmin(distances)
-        closest_child = node.children[closest_idx]
-
-        if adapt and true_label is not None:
-            pred = self._traverse_network(x, closest_child, adapt=False)
-            if pred != true_label:
-                node.error_count += 1
-                if node.error_count / 10 > self.adapt_threshold:
-                    self._liquid_split(node, x, true_label)
-        return self._traverse_network(x, closest_child, adapt=adapt, true_label=true_label)
-
     def _liquid_split(self, node, x, true_label):
+        # Create a new branch if maximum splits not reached
         if len(node.children) >= self.max_splits:
             return
         new_center = x
@@ -159,39 +186,93 @@ class FractalFlowNetwork:
         node.error_count = 0
 
     def _adapt_node(self, node, x, true_label):
-        node.center = 0.9 * node.center + 0.1 * x
+        # Update the node’s center using momentum and adjust its label to the true label
+        node.center = self.momentum * node.center + (1 - self.momentum) * x
         node.value = true_label
         node.error_count = 0
 
 
-# Evaluate the FFN on multiple datasets
-def evaluate_ffn(dataset_name):
-    dataset_loaders = {
-        "Iris": load_iris,
-        "Wine": load_wine,
-        "Breast Cancer": load_breast_cancer
-    }
-    dataset = dataset_loaders[dataset_name]()
+# --- Evaluation Function --- #
+def evaluate_models(dataset_name):
+    # Load dataset
+    if dataset_name == "Iris":
+        dataset = load_iris()
+    elif dataset_name == "Wine":
+        dataset = load_wine()
+    elif dataset_name == "Breast Cancer":
+        dataset = load_breast_cancer()
+    else:
+        raise ValueError("Unknown dataset")
+
     X, y = dataset.data, dataset.target
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
+    # Standardize features
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_test = scaler.transform(X_test)
 
-    ffn = FractalFlowNetwork(max_depth=5, min_samples_split=5, max_splits=4, adapt_threshold=0.1)
-    start_time = time.time()
+    models = {}
+    results = {}
+
+    # --- 1. Custom FractalFlowNet (FFN) --- #
+    ffn = FractalFlowNet(max_depth=5, min_samples_split=5, max_splits=4,
+                         adapt_threshold=0.1, momentum=0.9, flow_temp=1.0)
+    start = time.time()
     ffn.fit(X_train, y_train)
-    train_time = time.time() - start_time
-
+    train_time = time.time() - start
     y_pred = ffn.predict(X_test, y_test, adapt=True)
-    accuracy = accuracy_score(y_test, y_pred)
+    acc = accuracy_score(y_test, y_pred)
+    models["FFN"] = ffn
+    results["FFN"] = {"train_time": train_time, "accuracy": acc}
 
-    print(f"\n--- {dataset_name} Dataset ---")
-    print(f"FFN Training Time: {train_time:.4f} seconds")
-    print(f"FFN Accuracy with Adaptation: {accuracy:.4f}")
+    # --- 2. Decision Tree --- #
+    dt = DecisionTreeClassifier(random_state=42)
+    start = time.time()
+    dt.fit(X_train, y_train)
+    train_time = time.time() - start
+    y_pred = dt.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    models["Decision Tree"] = dt
+    results["Decision Tree"] = {"train_time": train_time, "accuracy": acc}
+
+    # --- 3. Random Forest --- #
+    rf = RandomForestClassifier(random_state=42)
+    start = time.time()
+    rf.fit(X_train, y_train)
+    train_time = time.time() - start
+    y_pred = rf.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    models["Random Forest"] = rf
+    results["Random Forest"] = {"train_time": train_time, "accuracy": acc}
+
+    # --- 4. Logistic Regression --- #
+    lr = LogisticRegression(max_iter=1000, random_state=42)
+    start = time.time()
+    lr.fit(X_train, y_train)
+    train_time = time.time() - start
+    y_pred = lr.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    models["Logistic Regression"] = lr
+    results["Logistic Regression"] = {"train_time": train_time, "accuracy": acc}
+
+    # --- 5. Support Vector Classifier (SVC) --- #
+    svc = SVC(random_state=42)
+    start = time.time()
+    svc.fit(X_train, y_train)
+    train_time = time.time() - start
+    y_pred = svc.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    models["SVC"] = svc
+    results["SVC"] = {"train_time": train_time, "accuracy": acc}
+
+    # Print side-by-side results
+    print(f"\n--- {dataset_name} Dataset Comparison ---")
+    print("{:<20} {:<15} {:<15}".format("Model", "Train Time (s)", "Accuracy"))
+    for model_name, metrics in results.items():
+        print("{:<20} {:<15.4f} {:<15.4f}".format(model_name, metrics["train_time"], metrics["accuracy"]))
 
 
 if __name__ == "__main__":
     for dataset in ["Iris", "Wine", "Breast Cancer"]:
-        evaluate_ffn(dataset)
+        evaluate_models(dataset)
