@@ -65,8 +65,8 @@ class MandalaFractalNet:
             return
 
         # Create children arranged in a mandala (radial, symmetric) pattern.
-        children = []
         d = node.center.shape[0]
+        children = []
         for i in range(self.max_children):
             # Generate a random unit vector in the latent space.
             direction = np.random.randn(d)
@@ -78,21 +78,18 @@ class MandalaFractalNet:
             child = MandalaFractalNode(child_center, child_radius)
             children.append(child)
 
-        # Assign each point to its nearest child center.
-        assignments = [[] for _ in range(self.max_children)]
-        indices = [[] for _ in range(self.max_children)]
-        for idx, x in enumerate(X):
-            distances = [np.linalg.norm(x - child.center) for child in children]
-            chosen = np.argmin(distances)
-            assignments[chosen].append(x)
-            indices[chosen].append(idx)
+        # Vectorized assignment of points to the nearest child center.
+        centers = np.array([child.center for child in children])
+        distances = np.linalg.norm(X[:, None] - centers[None, :], axis=2)  # shape: (n_samples, max_children)
+        chosen = np.argmin(distances, axis=1)
+        assignments = [X[chosen == i] for i in range(self.max_children)]
+        y = np.array(y)
+        indices = [np.where(chosen == i)[0] for i in range(self.max_children)]
 
         # Recursively grow each child that has assigned points.
         for i, child in enumerate(children):
-            if len(assignments[i]) > 0:
-                X_child = np.array(assignments[i])
-                y_child = np.array(y)[indices[i]]
-                self._grow_network(X_child, y_child, child, depth + 1)
+            if assignments[i].shape[0] > 0:
+                self._grow_network(assignments[i], y[indices[i]], child, depth + 1)
                 node.children.append(child)
 
         # If no child was created, mark this node as a leaf.
@@ -100,14 +97,15 @@ class MandalaFractalNet:
             node.value = Counter(y).most_common(1)[0][0]
 
     def _compute_flow_weights(self, x, children):
-        # Compute distances from x to each child's center.
-        distances = np.array([np.linalg.norm(x - child.center) for child in children])
-        # Use a softmax-like weighting with the flow temperature.
+        # Vectorized computation: stack child centers and compute distances.
+        centers = np.array([child.center for child in children])
+        distances = np.linalg.norm(centers - x, axis=1)
         weights = np.exp(-distances / self.flow_temp)
-        if np.sum(weights) == 0:
+        total = np.sum(weights)
+        if total == 0:
             weights = np.ones_like(weights)
         else:
-            weights /= np.sum(weights)
+            weights = weights / total
         return weights
 
     def _traverse(self, x, node, adapt=False, true_label=None):
