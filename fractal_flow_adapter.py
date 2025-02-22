@@ -1,13 +1,10 @@
 import numpy as np
 from collections import Counter
-from sklearn.decomposition import PCA
 from sklearn.datasets import load_iris, load_wine, load_breast_cancer
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
-from scipy.spatial.distance import pdist
 import time
-from sklearn.cluster import KMeans
 
 # Additional classifiers from scikit-learn
 from sklearn.tree import DecisionTreeClassifier
@@ -15,178 +12,145 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 
-
-# --- Custom FractalFlowNet (FFN) --- #
-class FFNNode:
-    def __init__(self, center, radius, value=None, fractal_dim=0.0):
+# --- Mandala Fractal Node and Network --- #
+class MandalaFractalNode:
+    def __init__(self, center, radius, value=None):
+        """
+        Represents a 'box' that encodes a region of the latent space.
+        - center: The numeric center (abstract encoding) of the box.
+        - radius: A measure of the box's size.
+        - value: The predicted label if this node is a leaf.
+        """
         self.center = center
         self.radius = radius
-        self.children = []
         self.value = value
-        self.fractal_dim = fractal_dim  # Local fractal dimension estimate
-        self.error_count = 0          # Track local mispredictions for adaptation
+        self.children = []  # Sub-boxes arranged in a mandala (radial) pattern.
+        self.error_count = 0  # Count mispredictions for local adaptation.
 
     def is_leaf(self):
         return len(self.children) == 0 and self.value is not None
 
 
-class FractalFlowNet:
-    def __init__(self, max_depth=5, min_samples_split=5, max_splits=4,
+class MandalaFractalNet:
+    def __init__(self, max_depth=5, min_samples_split=5, max_children=4,
                  adapt_threshold=0.1, momentum=0.9, flow_temp=1.0):
         """
         Parameters:
-         - max_depth: Maximum recursion depth for network growth.
-         - min_samples_split: Minimum number of samples to attempt a split.
-         - max_splits: Maximum number of child nodes a node can split into.
-         - adapt_threshold: Error ratio threshold to trigger local adaptation.
-         - momentum: Controls how much a node’s center is updated during adaptation.
-         - flow_temp: Temperature parameter controlling the softness of flow weights.
+          - max_depth: Maximum recursive depth for growing the network.
+          - min_samples_split: Minimum samples required to split a node.
+          - max_children: Maximum number of child boxes (a mandala pattern).
+          - adapt_threshold: Local error ratio threshold for triggering adjustments.
+          - momentum: How much a node's center is updated (a fractal adjuster).
+          - flow_temp: Temperature controlling how 'flow' is computed during prediction.
         """
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
-        self.max_splits = max_splits
+        self.max_children = max_children
         self.adapt_threshold = adapt_threshold
         self.momentum = momentum
         self.flow_temp = flow_temp
         self.root = None
 
     def fit(self, X, y):
-        # Initialize with a single seed node (global mean and radius)
+        # Initialize with a global box covering all data.
         center = np.mean(X, axis=0)
         radius = np.max(np.linalg.norm(X - center, axis=1))
-        self.root = FFNNode(center, radius)
+        self.root = MandalaFractalNode(center, radius)
         self._grow_network(X, y, self.root, depth=0)
 
-    def _entropy(self, y):
-        hist = np.bincount(y, minlength=np.max(y) + 1)
-        ps = hist / len(y)
-        return -np.sum([p * np.log2(p) for p in ps if p > 0])
-
-    def _estimate_fractal_dim(self, X):
-        """
-        Estimate the fractal dimension using a correlation dimension approximation.
-        """
-        if len(X) < 2:
-            return 1.0
-        distances = pdist(X)
-        if np.max(distances) == 0:
-            return 1.0
-        r_values = np.percentile(distances, np.linspace(10, 90, 9)) + 1e-10
-        C_r = [np.mean(distances < r) for r in r_values]
-        C_r = np.array(C_r)
-        C_r = np.maximum(C_r, 1e-10)
-        log_r = np.log(r_values)
-        log_C_r = np.log(C_r)
-        slope, _ = np.polyfit(log_r, log_C_r, 1)
-        return slope
-
-    def _decide_splits(self, y, X):
-        unique_classes = len(np.unique(y))
-        if unique_classes <= 1:
-            return 1
-        max_entropy = np.log2(unique_classes)
-        entropy = self._entropy(y)
-        norm_entropy = entropy / max_entropy if max_entropy > 0 else 0
-        fractal_dim = self._estimate_fractal_dim(X)
-        complexity = norm_entropy * (fractal_dim / X.shape[1])
-        if complexity < 0.1:
-            return 1
-        elif complexity < 0.4:
-            return 2
-        elif complexity < 0.7:
-            return 3
-        else:
-            return min(self.max_splits, int(np.ceil(fractal_dim)))
-
     def _grow_network(self, X, y, node, depth):
-        if len(y) < self.min_samples_split or depth >= self.max_depth:
+        # If too few samples, at max depth, or data is pure, mark as leaf.
+        if len(y) < self.min_samples_split or depth >= self.max_depth or len(np.unique(y)) == 1:
             node.value = Counter(y).most_common(1)[0][0] if len(y) > 0 else 0
             return
 
-        k = self._decide_splits(y, X)
-        node.fractal_dim = self._estimate_fractal_dim(X)
-        if k == 1:
-            node.value = Counter(y).most_common(1)[0][0]
-            return
+        # Create children arranged in a mandala (radial, symmetric) pattern.
+        children = []
+        d = node.center.shape[0]
+        for i in range(self.max_children):
+            # Generate a random unit vector in the latent space.
+            direction = np.random.randn(d)
+            direction /= np.linalg.norm(direction)
+            # "Box" idea: offset is a fraction of parent's radius.
+            offset = (node.radius / 2) * direction
+            child_center = node.center + offset
+            child_radius = node.radius / 2
+            child = MandalaFractalNode(child_center, child_radius)
+            children.append(child)
 
-        # Optionally reduce dimensionality via PCA for clustering efficiency
-        if X.shape[0] > k and X.shape[1] > 1:
-            pca = PCA(n_components=min(k - 1, X.shape[1]))
-            X_proj = pca.fit_transform(X)
-        else:
-            X_proj = X
+        # Assign each point to its nearest child center.
+        assignments = [[] for _ in range(self.max_children)]
+        indices = [[] for _ in range(self.max_children)]
+        for idx, x in enumerate(X):
+            distances = [np.linalg.norm(x - child.center) for child in children]
+            chosen = np.argmin(distances)
+            assignments[chosen].append(x)
+            indices[chosen].append(idx)
 
-        kmeans = KMeans(n_clusters=k, random_state=0).fit(X_proj)
-        labels = kmeans.labels_
-        child_radius = node.radius / np.sqrt(k)
+        # Recursively grow each child that has assigned points.
+        for i, child in enumerate(children):
+            if len(assignments[i]) > 0:
+                X_child = np.array(assignments[i])
+                y_child = np.array(y)[indices[i]]
+                self._grow_network(X_child, y_child, child, depth + 1)
+                node.children.append(child)
 
-        for i in range(k):
-            cluster_idx = labels == i
-            if np.sum(cluster_idx) == 0:
-                continue
-            child_data = X[cluster_idx]
-            child_y = y[cluster_idx]
-            child_center = np.mean(child_data, axis=0)
-            child_node = FFNNode(child_center, child_radius)
-            node.children.append(child_node)
-            self._grow_network(child_data, child_y, child_node, depth + 1)
-
-        if not node.children:
+        # If no child was created, mark this node as a leaf.
+        if len(node.children) == 0:
             node.value = Counter(y).most_common(1)[0][0]
 
     def _compute_flow_weights(self, x, children):
-        # Compute distances from x to each child's center
+        # Compute distances from x to each child's center.
         distances = np.array([np.linalg.norm(x - child.center) for child in children])
-        # Softmax weighting with flow temperature
+        # Use a softmax-like weighting with the flow temperature.
         weights = np.exp(-distances / self.flow_temp)
         if np.sum(weights) == 0:
             weights = np.ones_like(weights)
         else:
-            weights = weights / np.sum(weights)
+            weights /= np.sum(weights)
         return weights
 
-    def _traverse_network(self, x, node, adapt=False, true_label=None):
+    def _traverse(self, x, node, adapt=False, true_label=None):
         if node.is_leaf():
             if adapt and true_label is not None and node.value != true_label:
                 node.error_count += 1
-                if node.error_count / (len(node.children) + 1) > self.adapt_threshold:
+                if node.error_count > self.adapt_threshold * (len(node.children) + 1):
                     self._adapt_node(node, x, true_label)
             return node.value
 
-        # Compute flow weights and choose the child with the highest weight
+        # Compute flow weights and choose a child.
         weights = self._compute_flow_weights(x, node.children)
-        chosen_idx = np.argmax(weights)
-        chosen_child = node.children[chosen_idx]
+        chosen_index = np.argmax(weights)
+        chosen_child = node.children[chosen_index]
 
-        # Check for adaptation: if prediction from chosen branch is off, perform liquid splitting
+        # Adaptation: if the chosen branch misclassifies, trigger a "liquid split".
         if adapt and true_label is not None:
-            pred = self._traverse_network(x, chosen_child, adapt=False)
+            pred = self._traverse(x, chosen_child, adapt=False)
             if pred != true_label:
                 node.error_count += 1
-                if node.error_count / (len(node.children) + 1) > self.adapt_threshold:
+                if node.error_count > self.adapt_threshold * (len(node.children) + 1):
                     self._liquid_split(node, x, true_label)
-        return self._traverse_network(x, chosen_child, adapt=adapt, true_label=true_label)
+        return self._traverse(x, chosen_child, adapt=adapt, true_label=true_label)
 
     def predict(self, X, y=None, adapt=False):
         preds = []
         for i, x in enumerate(X):
-            pred = self._traverse_network(x, self.root, adapt=adapt,
-                                          true_label=y[i] if y is not None else None)
+            pred = self._traverse(x, self.root, adapt=adapt, true_label=y[i] if y is not None else None)
             preds.append(pred)
         return np.array(preds)
 
     def _liquid_split(self, node, x, true_label):
-        # Create a new branch if maximum splits not reached
-        if len(node.children) >= self.max_splits:
+        # If the node hasn't reached its maximum children, add a new branch.
+        if len(node.children) >= self.max_children:
             return
         new_center = x
         new_radius = node.radius / 2
-        new_node = FFNNode(new_center, new_radius, value=true_label)
+        new_node = MandalaFractalNode(new_center, new_radius, value=true_label)
         node.children.append(new_node)
         node.error_count = 0
 
     def _adapt_node(self, node, x, true_label):
-        # Update the node’s center using momentum and adjust its label to the true label
+        # Adjust the node's center (the "box adjuster") using momentum.
         node.center = self.momentum * node.center + (1 - self.momentum) * x
         node.value = true_label
         node.error_count = 0
@@ -194,7 +158,7 @@ class FractalFlowNet:
 
 # --- Evaluation Function --- #
 def evaluate_models(dataset_name):
-    # Load dataset
+    # Load the dataset.
     if dataset_name == "Iris":
         dataset = load_iris()
     elif dataset_name == "Wine":
@@ -207,7 +171,7 @@ def evaluate_models(dataset_name):
     X, y = dataset.data, dataset.target
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # Standardize features
+    # Standardize features.
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
     X_test = scaler.transform(X_test)
@@ -215,16 +179,16 @@ def evaluate_models(dataset_name):
     models = {}
     results = {}
 
-    # --- 1. Custom FractalFlowNet (FFN) --- #
-    ffn = FractalFlowNet(max_depth=5, min_samples_split=5, max_splits=4,
-                         adapt_threshold=0.1, momentum=0.9, flow_temp=1.0)
+    # --- 1. Custom MandalaFractalNet --- #
+    mandala_net = MandalaFractalNet(max_depth=5, min_samples_split=5, max_children=4,
+                                    adapt_threshold=0.1, momentum=0.9, flow_temp=1.0)
     start = time.time()
-    ffn.fit(X_train, y_train)
+    mandala_net.fit(X_train, y_train)
     train_time = time.time() - start
-    y_pred = ffn.predict(X_test, y_test, adapt=True)
+    y_pred = mandala_net.predict(X_test, y_test, adapt=True)
     acc = accuracy_score(y_test, y_pred)
-    models["FFN"] = ffn
-    results["FFN"] = {"train_time": train_time, "accuracy": acc}
+    models["MandalaFractalNet"] = mandala_net
+    results["MandalaFractalNet"] = {"train_time": train_time, "accuracy": acc}
 
     # --- 2. Decision Tree --- #
     dt = DecisionTreeClassifier(random_state=42)
@@ -266,11 +230,11 @@ def evaluate_models(dataset_name):
     models["SVC"] = svc
     results["SVC"] = {"train_time": train_time, "accuracy": acc}
 
-    # Print side-by-side results
+    # Print side-by-side results.
     print(f"\n--- {dataset_name} Dataset Comparison ---")
-    print("{:<20} {:<15} {:<15}".format("Model", "Train Time (s)", "Accuracy"))
+    print("{:<25} {:<15} {:<15}".format("Model", "Train Time (s)", "Accuracy"))
     for model_name, metrics in results.items():
-        print("{:<20} {:<15.4f} {:<15.4f}".format(model_name, metrics["train_time"], metrics["accuracy"]))
+        print("{:<25} {:<15.4f} {:<15.4f}".format(model_name, metrics["train_time"], metrics["accuracy"]))
 
 
 if __name__ == "__main__":
