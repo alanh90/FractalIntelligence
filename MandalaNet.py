@@ -1,91 +1,95 @@
 import numpy as np
-
-try:
-    import cupy as cp
-
-    has_cupy = True
-except ImportError:
-    has_cupy = False
-    cp = np  # Fallback to NumPy if CuPy is not available
 from collections import Counter
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import StandardScaler
-from sklearn.feature_selection import mutual_info_classif
-from sklearn.datasets import load_iris, load_wine, load_breast_cancer
-import time
 from sklearn.tree import DecisionTreeClassifier
 from xgboost import XGBClassifier
+import time
+from sklearn.datasets import load_iris, load_wine, load_breast_cancer
+from scipy.stats import entropy as scipy_entropy
 
 
-# --- Fast Fractal Flow Network --- #
+# --- Fast Fractal Flow Network with Entropy and Probabilistic Predictions --- #
 class FastFractalFlowNetwork:
-    def __init__(self, max_depth=3, threshold=0.1, use_gpu=True):
-        """Initialize the Fast FFN."""
+    def __init__(self, max_depth=3, threshold=0.1):
+        """
+        Initialize the FastFractalFlowNetwork.
+
+        Parameters:
+        - max_depth: Maximum fractal depth (number of features to split on).
+        - threshold: Error threshold for triggering adaptation.
+        """
         self.max_depth = max_depth
         self.threshold = threshold
-        self.use_gpu = use_gpu and has_cupy
-        self.top_features = None
-        self.medians = None
-        self.majority_labels = None
-        self.error_counts = None
+        self.top_features = None  # Indices of selected features
+        self.medians = None  # Median values for splitting
+        self.bucket_probs = None  # Probability distributions per bucket
+        self.error_counts = None  # Error tracking for adaptation
 
     def fit(self, X, y):
-        """Fit the model with binary splits on top features."""
-        if self.use_gpu:
-            X = cp.array(X)
-            y = cp.array(y)
-            feature_importance = mutual_info_classif(X.get(), y.get())
-            feature_importance = cp.array(feature_importance)
-            self.top_features = cp.argsort(-feature_importance)[:self.max_depth].get()  # Convert to NumPy for indexing
-            self.medians = cp.median(X[:, self.top_features], axis=0)  # Keep as CuPy
-        else:
-            feature_importance = mutual_info_classif(X, y)
-            self.top_features = np.argsort(-feature_importance)[:self.max_depth]
-            self.medians = np.median(X[:, self.top_features], axis=0)
+        """
+        Fit the model to the training data.
 
-        # Compute bucket labels using binary splits on CPU
-        X_cpu = X.get() if self.use_gpu else X
-        binary_splits = (X_cpu[:, self.top_features] > self.medians.get() if self.use_gpu else self.medians).astype(int)
+        Parameters:
+        - X: Feature matrix (n_samples, n_features).
+        - y: Target array (n_samples).
+        """
+        # Select features using entropy
+        entropies = [scipy_entropy(X[:, i]) for i in range(X.shape[1])]
+        self.top_features = np.argsort(entropies)[-self.max_depth:]
+
+        # Compute medians for splitting
+        self.medians = np.median(X[:, self.top_features], axis=0)
+
+        # Assign data to buckets using binary splits
+        binary_splits = (X[:, self.top_features] > self.medians).astype(int)
         bucket_labels = np.dot(binary_splits, (2 ** np.arange(self.max_depth))[::-1])
 
-        # Compute majority labels for each bucket
-        self.majority_labels = []
+        # Compute probability distributions for each bucket
+        self.bucket_probs = []
         for i in range(2 ** self.max_depth):
             mask = bucket_labels == i
             if np.sum(mask) > 0:
-                values = y.get()[mask] if self.use_gpu else y[mask]
-                majority = np.bincount(values).argmax()
+                values = y[mask]
+                counts = np.bincount(values, minlength=np.max(y) + 1)
+                probs = counts / np.sum(counts)
             else:
-                majority = 0
-            self.majority_labels.append(majority)
+                probs = np.zeros(np.max(y) + 1)
+            self.bucket_probs.append(probs)
 
-        # Initialize error counts for adaptation
+        # Initialize error counts
         self.error_counts = np.zeros(2 ** self.max_depth)
 
     def predict(self, X, y=None, adapt=False):
-        """Predict labels for input data, with optional adaptation."""
-        if self.use_gpu:
-            X = cp.array(X)
+        """
+        Predict labels for input data, with optional adaptation.
 
-        # Compute binary splits directly on X
+        Parameters:
+        - X: Feature matrix (n_samples, n_features).
+        - y: True labels (optional, for adaptation).
+        - adapt: Boolean to enable online adaptation.
+
+        Returns:
+        - Predicted labels (n_samples).
+        """
+        # Compute bucket assignments
         binary_splits = (X[:, self.top_features] > self.medians).astype(int)
-        bucket_labels = cp.dot(binary_splits, (2 ** cp.arange(self.max_depth))[::-1]) if self.use_gpu else np.dot(binary_splits, (2 ** np.arange(self.max_depth))[::-1])
+        bucket_labels = np.dot(binary_splits, (2 ** np.arange(self.max_depth))[::-1])
 
-        # Convert bucket_labels to CPU for prediction and adaptation
-        bucket_labels_cpu = bucket_labels.get() if self.use_gpu else bucket_labels
-        preds = [self.majority_labels[int(label)] for label in bucket_labels_cpu]
+        # Predict using maximum probability
+        preds = [np.argmax(self.bucket_probs[label]) for label in bucket_labels]
 
-        # Adapt the model if true labels are provided and adapt is True
+        # Adapt model if true labels provided
         if adapt and y is not None:
-            # Ensure y_cpu is a NumPy array
-            y_cpu = y.get() if isinstance(y, cp.ndarray) else y
-            for i, (pred, true) in enumerate(zip(preds, y_cpu)):
+            for i, (pred, true) in enumerate(zip(preds, y)):
                 if pred != true:
-                    bucket = int(bucket_labels_cpu[i])
+                    bucket = bucket_labels[i]
                     self.error_counts[bucket] += 1
                     if self.error_counts[bucket] / 10 > self.threshold:
-                        self.majority_labels[bucket] = true
+                        # Update probabilities incrementally
+                        self.bucket_probs[bucket][true] += 0.1
+                        self.bucket_probs[bucket] /= np.sum(self.bucket_probs[bucket])
                         self.error_counts[bucket] = 0
 
         return np.array(preds)
@@ -93,7 +97,7 @@ class FastFractalFlowNetwork:
 
 # --- Dataset Loader --- #
 def load_dataset(name):
-    """Load a standard dataset and split it into training and testing sets."""
+    """Load and preprocess a dataset."""
     if name == "Iris":
         data = load_iris()
     elif name == "Wine":
@@ -113,11 +117,11 @@ def load_dataset(name):
 
 # --- Model Evaluation --- #
 def evaluate_models(dataset_name, X_train, X_test, y_train, y_test):
-    """Evaluate the FastFractalFlowNetwork against Decision Tree and XGBoost."""
+    """Evaluate FFN, Decision Tree, and XGBoost on a dataset."""
     print(f"\nEvaluating {dataset_name}")
 
     # Fast Fractal Flow Network
-    ffn = FastFractalFlowNetwork(max_depth=3, threshold=0.1, use_gpu=has_cupy)
+    ffn = FastFractalFlowNetwork(max_depth=3, threshold=0.1)
     start = time.time()
     ffn.fit(X_train, y_train)
     train_time = time.time() - start
