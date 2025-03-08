@@ -9,9 +9,7 @@ from sklearn.neural_network import MLPClassifier, MLPRegressor
 import time
 from scipy import stats
 import random
-import matplotlib.cm as cm
 import pandas as pd
-from functools import partial
 from mpl_toolkits.mplot3d import Axes3D
 
 
@@ -29,7 +27,8 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
     """
 
     def __init__(self, turbulence=0.1, flow_rate=0.05, viscosity=0.8,
-                 pressure_sensitivity=1.0, n_pressure_points=None, max_iterations=15):
+                 pressure_sensitivity=1.0, n_pressure_points=None, max_iterations=15,
+                 stochastic_factor=0.02):
         """
         Initialize FluidTopoNetwork.
 
@@ -40,6 +39,7 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
         - pressure_sensitivity: Sensitivity to input data pressure points
         - n_pressure_points: Number of pressure points to create (if None, will be data-dependent)
         - max_iterations: Maximum number of fluid dynamics simulation iterations
+        - stochastic_factor: Amount of randomness in model updates (exploration factor)
         """
         self.turbulence = turbulence
         self.flow_rate = flow_rate
@@ -47,6 +47,7 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
         self.pressure_sensitivity = pressure_sensitivity
         self.n_pressure_points = n_pressure_points
         self.max_iterations = max_iterations
+        self.stochastic_factor = stochastic_factor
 
         # Internal state
         self.flow_pathways = None
@@ -152,7 +153,6 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
 
     def _fluid_dynamics(self, X, y=None):
         """Simulate fluid dynamics through the network."""
-        n_samples = X.shape[0]
         n_points = len(self.pressure_points)
 
         # Calculate pressure at each point
@@ -195,7 +195,9 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
                 if i != j:
                     flow = self.flow_pathways[i, j]
                     direction = other_point - point
-                    movement[i] += flow * direction / (np.linalg.norm(direction) + 1e-10)
+                    # Avoid division by zero with small epsilon
+                    norm = np.linalg.norm(direction) + 1e-10
+                    movement[i] += flow * direction / norm
 
             # If we have labels, add label-based force
             if y is not None:
@@ -243,6 +245,9 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
             if total_flow > 0:
                 movement[i] /= total_flow
 
+            # Add stochastic factor for exploration
+            movement[i] += np.random.normal(0, self.stochastic_factor, size=movement[i].shape)
+
         # Apply movement with viscosity damping
         original_points = self.pressure_points.copy()
         self.pressure_points += movement * (1 - self.viscosity) * self.flow_rate
@@ -254,9 +259,13 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
             feature_importance[feat_idx] = importance
 
         # Update feature importance (with smoothing)
-        self.feature_importance_ = 0.8 * self.feature_importance_ + 0.2 * (
-                feature_importance / (np.sum(feature_importance) + 1e-10)
-        )
+        sum_importance = np.sum(feature_importance)
+        if sum_importance > 0:
+            normalized_importance = feature_importance / sum_importance
+        else:
+            normalized_importance = np.ones_like(feature_importance) / len(feature_importance)
+
+        self.feature_importance_ = 0.8 * self.feature_importance_ + 0.2 * normalized_importance
 
         return pressures
 
@@ -279,16 +288,22 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
                         class_pressures[i] = np.sum(1.0 / (1.0 + class_distances ** 2))
 
                     # Create new vortex with influence from top pressure points
-                    top_indices = np.argsort(class_pressures)[-min(3, len(class_pressures)):]
-                    vortex_center = np.mean(self.pressure_points[top_indices], axis=0)
-                    vortex_strength = np.sum(class_mask) / len(X)
+                    # Safely handle the case with fewer pressure points than 3
+                    num_top = min(3, len(class_pressures))
+                    if num_top > 0:
+                        top_indices = np.argsort(class_pressures)[-num_top:]
+                        vortex_center = np.mean(self.pressure_points[top_indices], axis=0)
+                        vortex_strength = np.sum(class_mask) / len(X)
 
-                    # Create or update vortex
-                    new_vortices.append((vortex_center, vortex_strength, class_val))
+                        # Create or update vortex
+                        new_vortices.append((vortex_center, vortex_strength, class_val))
 
             self.vortices = new_vortices
         else:
             # For regression tasks
+            if len(self.vortices) == 0:
+                return  # Skip if no vortices
+
             y_min, y_max = np.min(y), np.max(y)
             n_vortices = len(self.vortices)
 
@@ -326,7 +341,7 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
                 y_pred = sum(infl * y_val for infl, y_val in vortex_influences) / total_influence
             else:
                 # Default to average if no influence
-                y_pred = np.mean([y_val for _, _, y_val in self.vortices])
+                y_pred = np.mean([y_val for _, _, y_val in self.vortices]) if self.vortices else 0.0
 
             return y_pred
         else:
@@ -342,7 +357,7 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
             if vortex_influences:
                 return max(vortex_influences, key=lambda x: x[0])[1]
             else:
-                return self.classes_[0]  # Default if no vortices
+                return self.classes_[0] if hasattr(self, 'classes_') and len(self.classes_) > 0 else 0  # Default if no vortices
 
     def fit(self, X, y):
         """Fit the fluid network to training data."""
@@ -370,8 +385,13 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
 
             # Check convergence (how much the model changed)
             point_change = np.mean(np.linalg.norm(self.pressure_points - original_points, axis=1))
-            vortex_change = np.mean([np.linalg.norm(v[0] - ov[0])
-                                     for v, ov in zip(self.vortices, original_vortices)])
+
+            # Calculate vortex change safely
+            if len(self.vortices) == len(original_vortices) and len(self.vortices) > 0:
+                vortex_change = np.mean([np.linalg.norm(v[0] - ov[0])
+                                         for v, ov in zip(self.vortices, original_vortices)])
+            else:
+                vortex_change = 1.0  # Significant change if vortex count changed
 
             convergence = point_change + vortex_change
             convergence_metric.append(convergence)
@@ -484,18 +504,22 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
         if hasattr(self, "_regression"):
             # For regression, color by output value
             vortex_values = [v[2] for v in vortices_2d]
-            min_val, max_val = min(vortex_values), max(vortex_values)
+            min_val = min(vortex_values) if vortex_values else 0
+            max_val = max(vortex_values) if vortex_values else 1
 
             for center, strength, y_val in vortices_2d:
                 # Normalize value for color
-                color_val = (y_val - min_val) / (max_val - min_val + 1e-10)
+                color_val = (y_val - min_val) / max(max_val - min_val, 1e-10)
                 plt.scatter(center[0], center[1], s=min(300 * strength, 500),
-                            c=[cmap(color_val)], alpha=0.7, edgecolors='k')
+                            c=[cmap(np.clip(color_val, 0, 1))], alpha=0.7, edgecolors='k')
         else:
             # For classification, color by class
             for center, strength, class_val in vortices_2d:
-                class_idx = np.where(self.classes_ == class_val)[0][0]
-                color_val = class_idx / (len(self.classes_) - 1) if len(self.classes_) > 1 else 0.5
+                if hasattr(self, 'classes_') and len(self.classes_) > 0:
+                    class_idx = np.where(self.classes_ == class_val)[0][0]
+                    color_val = class_idx / max(len(self.classes_) - 1, 1)
+                else:
+                    color_val = 0.5
                 plt.scatter(center[0], center[1], s=min(300 * strength, 500),
                             c=[cmap(color_val)], alpha=0.7, edgecolors='k',
                             label=f'Class {class_val}')
@@ -508,13 +532,14 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
                 plt.colorbar(sc, label='Output Value')
             else:
                 # For classification, color points by class
-                for i, class_val in enumerate(self.classes_):
-                    mask = y == class_val
-                    if np.any(mask):
-                        color_val = i / (len(self.classes_) - 1) if len(self.classes_) > 1 else 0.5
-                        plt.scatter(X_2d[mask, 0], X_2d[mask, 1], s=30,
-                                    c=[cmap(color_val)], alpha=0.5,
-                                    label=f'Data Class {class_val}')
+                if hasattr(self, 'classes_'):
+                    for i, class_val in enumerate(self.classes_):
+                        mask = y == class_val
+                        if np.any(mask):
+                            color_val = i / max(len(self.classes_) - 1, 1)
+                            plt.scatter(X_2d[mask, 0], X_2d[mask, 1], s=30,
+                                        c=[cmap(color_val)], alpha=0.5,
+                                        label=f'Data Class {class_val}')
 
         # Finishing touches
         plt.title(title)
@@ -550,6 +575,11 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
         if feature_names is None:
             feature_names = [f"Feature {i}" for i in range(len(self.feature_importance_))]
 
+        # Ensure we have the right number of feature names
+        if len(feature_names) < len(self.feature_importance_):
+            # Extend feature names if needed
+            feature_names = list(feature_names) + [f"Feature {i}" for i in range(len(feature_names), len(self.feature_importance_))]
+
         # Sort features by importance
         sorted_idx = np.argsort(self.feature_importance_)
         pos = np.arange(sorted_idx.shape[0]) + 0.5
@@ -567,14 +597,16 @@ class FluidTopoRegressor(FluidTopoNetwork, RegressorMixin):
     """Fluid Topology Network for regression tasks."""
 
     def __init__(self, turbulence=0.05, flow_rate=0.05, viscosity=0.8,
-                 pressure_sensitivity=1.0, n_pressure_points=None, max_iterations=15):
+                 pressure_sensitivity=1.0, n_pressure_points=None, max_iterations=15,
+                 stochastic_factor=0.02):
         super().__init__(
             turbulence=turbulence,
             flow_rate=flow_rate,
             viscosity=viscosity,
             pressure_sensitivity=pressure_sensitivity,
             n_pressure_points=n_pressure_points,
-            max_iterations=max_iterations
+            max_iterations=max_iterations,
+            stochastic_factor=stochastic_factor
         )
         # Mark as regression model
         self._regression = True
@@ -589,17 +621,20 @@ class FluidTopoRegressor(FluidTopoNetwork, RegressorMixin):
 class EnhancedFluidTopoNetwork(FluidTopoNetwork):
     def __init__(self, turbulence=0.1, flow_rate=0.05, viscosity=0.8,
                  pressure_sensitivity=1.0, vortex_interaction=0.2, adaptive_turbulence=True,
-                 n_pressure_points=None, max_iterations=15):
+                 n_pressure_points=None, max_iterations=15, stochastic_factor=0.02,
+                 self_organization_factor=0.1):
         super().__init__(
             turbulence=turbulence,
             flow_rate=flow_rate,
             viscosity=viscosity,
             pressure_sensitivity=pressure_sensitivity,
             n_pressure_points=n_pressure_points,
-            max_iterations=max_iterations
+            max_iterations=max_iterations,
+            stochastic_factor=stochastic_factor
         )
         self.vortex_interaction = vortex_interaction
         self.adaptive_turbulence = adaptive_turbulence
+        self.self_organization_factor = self_organization_factor
         self.error_history = []
         self.decision_boundaries = None
 
@@ -642,6 +677,17 @@ class EnhancedFluidTopoNetwork(FluidTopoNetwork):
             if movement_magnitude > 0.5:  # Cap maximum movement
                 net_movement = net_movement * 0.5 / movement_magnitude
 
+            # Add self-organization factor (emergent behavior)
+            if self.self_organization_factor > 0:
+                # Create a small random movement influenced by feature importance
+                random_direction = np.random.randn(*center_i.shape)
+                if hasattr(self, 'feature_importance_') and self.feature_importance_ is not None:
+                    # Weight random movement by feature importance
+                    random_direction *= self.feature_importance_
+
+                # Add this to net movement
+                net_movement += random_direction * self.self_organization_factor
+
             new_center = center_i + net_movement
             new_vortices.append((new_center, strength_i, class_i))
 
@@ -653,13 +699,26 @@ class EnhancedFluidTopoNetwork(FluidTopoNetwork):
             return
 
         # Check recent error history to adapt turbulence
-        if self.error_history:
+        if len(self.error_history) >= 2:
             # If error is increasing, increase turbulence for exploration
-            if len(self.error_history) >= 2 and self.error_history[-1] > self.error_history[-2]:
+            if self.error_history[-1] > self.error_history[-2]:
                 self.turbulence = min(0.3, self.turbulence * 1.2)
+                # Also increase stochastic factor for more exploration
+                self.stochastic_factor = min(0.05, self.stochastic_factor * 1.2)
             else:
                 # If error is decreasing, reduce turbulence for exploitation
                 self.turbulence = max(0.01, self.turbulence * 0.9)
+                # Also decrease stochastic factor for more exploitation
+                self.stochastic_factor = max(0.005, self.stochastic_factor * 0.9)
+
+            # Adapt self-organization factor based on convergence
+            if len(self.convergence_history) >= 2:
+                if self.convergence_history[-1] < self.convergence_history[-2]:
+                    # Model is converging, reduce self-organization
+                    self.self_organization_factor *= 0.95
+                else:
+                    # Model is not converging well, increase self-organization
+                    self.self_organization_factor = min(0.2, self.self_organization_factor * 1.1)
 
     def fit(self, X, y):
         """Enhanced fit method with vortex interactions."""
@@ -669,13 +728,19 @@ class EnhancedFluidTopoNetwork(FluidTopoNetwork):
         for _ in range(5):
             self._vortex_interactions()
             self._fluid_dynamics(X, y)
-            self._adaptive_parameters(X, y)
 
             # Validate current model
             if len(X) > 10:
                 preds = self.predict(X)
-                error = np.mean(preds != y)
+                if hasattr(self, '_regression'):
+                    # For regression, use MSE
+                    error = np.mean((preds - y) ** 2)
+                else:
+                    # For classification, use error rate
+                    error = np.mean(preds != y)
                 self.error_history.append(error)
+
+            self._adaptive_parameters(X, y)
 
         # For 2D data, precompute decision boundaries for visualization
         if X.shape[1] == 2:
@@ -685,17 +750,21 @@ class EnhancedFluidTopoNetwork(FluidTopoNetwork):
 
     def _precompute_decision_boundaries(self, X):
         """Precompute decision boundaries for 2D data."""
-        # Create a grid covering the data space
-        x_min, x_max = X[:, 0].min() - 1, X[:, 0].max() + 1
-        y_min, y_max = X[:, 1].min() - 1, X[:, 1].max() + 1
-        xx, yy = np.meshgrid(np.linspace(x_min, x_max, 100),
-                             np.linspace(y_min, y_max, 100))
+        try:
+            # Create a grid covering the data space
+            x_min, x_max = X[:, 0].min() - 1, X[:, 0].max() + 1
+            y_min, y_max = X[:, 1].min() - 1, X[:, 1].max() + 1
+            xx, yy = np.meshgrid(np.linspace(x_min, x_max, 100),
+                                 np.linspace(y_min, y_max, 100))
 
-        # Make predictions on the grid
-        Z = self.predict(np.c_[xx.ravel(), yy.ravel()])
-        Z = Z.reshape(xx.shape)
+            # Make predictions on the grid
+            Z = self.predict(np.c_[xx.ravel(), yy.ravel()])
+            Z = Z.reshape(xx.shape)
 
-        self.decision_boundaries = (xx, yy, Z)
+            self.decision_boundaries = (xx, yy, Z)
+        except Exception as e:
+            print(f"Warning: Could not precompute decision boundaries: {str(e)}")
+            self.decision_boundaries = None
 
     def visualize_decision_boundary(self, X, y, title="Enhanced FluidTopoNetwork Decision Boundary"):
         """Visualize decision boundaries for 2D data."""
@@ -704,6 +773,9 @@ class EnhancedFluidTopoNetwork(FluidTopoNetwork):
 
         if self.decision_boundaries is None:
             self._precompute_decision_boundaries(X)
+
+        if self.decision_boundaries is None:
+            raise ValueError("Could not compute decision boundaries.")
 
         xx, yy, Z = self.decision_boundaries
 
@@ -742,7 +814,12 @@ class EnhancedFluidTopoNetwork(FluidTopoNetwork):
         plt.title(title)
         plt.xlabel('Feature 1')
         plt.ylabel('Feature 2')
-        plt.legend()
+
+        # Get unique labels for legend
+        handles, labels = plt.gca().get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        plt.legend(by_label.values(), by_label.keys())
+
         plt.tight_layout()
         return plt.gcf()
 
@@ -761,14 +838,17 @@ class EnhancedFluidTopoNetwork(FluidTopoNetwork):
                 vortex_influences.append((influence, class_idx))
 
             # Sort influences
-            vortex_influences.sort(reverse=True, key=lambda x: x[0])
+            if vortex_influences:
+                vortex_influences.sort(reverse=True, key=lambda x: x[0])
 
-            # Check if top two influences are close (uncertainty)
-            if len(vortex_influences) >= 2:
-                top1, top2 = vortex_influences[0], vortex_influences[1]
-                uncertainty = 1.0 - (top1[0] - top2[0]) / (top1[0] + 1e-10)
+                # Check if top two influences are close (uncertainty)
+                if len(vortex_influences) >= 2:
+                    top1, top2 = vortex_influences[0], vortex_influences[1]
+                    uncertainty = 1.0 - (top1[0] - top2[0]) / (top1[0] + 1e-10)
+                else:
+                    uncertainty = 0.0
             else:
-                uncertainty = 0.0
+                uncertainty = 1.0  # High uncertainty if no vortices
 
             uncertainties.append(uncertainty)
 
@@ -783,6 +863,9 @@ class EnhancedFluidTopoNetwork(FluidTopoNetwork):
 
         if self.decision_boundaries is None:
             self._precompute_decision_boundaries(X)
+
+        if self.decision_boundaries is None:
+            raise ValueError("Could not compute decision boundaries.")
 
         xx, yy, Z = self.decision_boundaries
 
@@ -809,7 +892,12 @@ class EnhancedFluidTopoNetwork(FluidTopoNetwork):
         ax.set_xlabel('Feature 1')
         ax.set_ylabel('Feature 2')
         ax.set_zlabel('Class')
-        ax.legend()
+
+        # Get unique labels for legend
+        handles, labels = ax.get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        ax.legend(by_label.values(), by_label.keys())
+
         plt.tight_layout()
         return fig
 
@@ -899,7 +987,7 @@ def evaluate_classification(dataset_name, X_train, X_test, y_train, y_test, feat
                         plt.savefig(f"{name}_{dataset_name}_model.png")
                         plt.close(fig)
                     except Exception as e:
-                        print(f"{name} - Error: {str(e)}")
+                        print(f"{name} - Visualization Error: {str(e)}")
 
                 if hasattr(model, 'visualize_convergence'):
                     try:
@@ -907,7 +995,7 @@ def evaluate_classification(dataset_name, X_train, X_test, y_train, y_test, feat
                         plt.savefig(f"{name}_{dataset_name}_convergence.png")
                         plt.close(fig)
                     except Exception as e:
-                        print(f"{name} - Error: {str(e)}")
+                        print(f"{name} - Convergence Visualization Error: {str(e)}")
 
                 if feature_names is not None and hasattr(model, 'visualize_feature_importance'):
                     try:
@@ -915,7 +1003,7 @@ def evaluate_classification(dataset_name, X_train, X_test, y_train, y_test, feat
                         plt.savefig(f"{name}_{dataset_name}_feature_importance.png")
                         plt.close(fig)
                     except Exception as e:
-                        print(f"{name} - Error: {str(e)}")
+                        print(f"{name} - Feature Importance Visualization Error: {str(e)}")
 
                 # For 2D datasets, visualize decision boundaries
                 if X_train.shape[1] == 2 and hasattr(model, 'visualize_decision_boundary'):
@@ -924,7 +1012,7 @@ def evaluate_classification(dataset_name, X_train, X_test, y_train, y_test, feat
                         plt.savefig(f"{name}_{dataset_name}_decision_boundary.png")
                         plt.close(fig)
                     except Exception as e:
-                        print(f"{name} - Error: {str(e)}")
+                        print(f"{name} - Decision Boundary Visualization Error: {str(e)}")
 
                     if name == "EnhancedFluidTopoNetwork":
                         try:
@@ -932,7 +1020,7 @@ def evaluate_classification(dataset_name, X_train, X_test, y_train, y_test, feat
                             plt.savefig(f"{name}_{dataset_name}_3d.png")
                             plt.close(fig)
                         except Exception as e:
-                            print(f"{name} - Error: {str(e)}")
+                            print(f"{name} - 3D Visualization Error: {str(e)}")
 
         except Exception as e:
             print(f"{name} - Error: {str(e)}")
@@ -993,7 +1081,7 @@ def evaluate_regression(dataset_name, X_train, X_test, y_train, y_test, feature_
                         plt.savefig(f"{name}_{dataset_name}_model.png")
                         plt.close(fig)
                     except Exception as e:
-                        print(f"{name} - Error: {str(e)}")
+                        print(f"{name} - Visualization Error: {str(e)}")
 
                 if hasattr(model, 'visualize_convergence'):
                     try:
@@ -1001,7 +1089,7 @@ def evaluate_regression(dataset_name, X_train, X_test, y_train, y_test, feature_
                         plt.savefig(f"{name}_{dataset_name}_convergence.png")
                         plt.close(fig)
                     except Exception as e:
-                        print(f"{name} - Error: {str(e)}")
+                        print(f"{name} - Convergence Visualization Error: {str(e)}")
 
                 if feature_names is not None and hasattr(model, 'visualize_feature_importance'):
                     try:
@@ -1009,7 +1097,7 @@ def evaluate_regression(dataset_name, X_train, X_test, y_train, y_test, feature_
                         plt.savefig(f"{name}_{dataset_name}_feature_importance.png")
                         plt.close(fig)
                     except Exception as e:
-                        print(f"{name} - Error: {str(e)}")
+                        print(f"{name} - Feature Importance Visualization Error: {str(e)}")
 
                 # For simple datasets, plot actual vs predicted
                 if X_train.shape[1] <= 3:
@@ -1023,7 +1111,7 @@ def evaluate_regression(dataset_name, X_train, X_test, y_train, y_test, feature_
                         plt.savefig(f"{name}_{dataset_name}_actual_vs_predicted.png")
                         plt.close()
                     except Exception as e:
-                        print(f"{name} - Error: {str(e)}")
+                        print(f"{name} - Actual vs Predicted Visualization Error: {str(e)}")
 
         except Exception as e:
             print(f"{name} - Error: {str(e)}")
@@ -1039,44 +1127,47 @@ def summarize_results(classification_results, regression_results):
         class_df = pd.DataFrame(classification_results)
         print(class_df[['name', 'train_time', 'predict_time', 'train_accuracy', 'test_accuracy']])
 
-        # Plot comparison chart
-        plt.figure(figsize=(12, 6))
+        try:
+            # Plot comparison chart
+            plt.figure(figsize=(12, 6))
 
-        # Accuracy comparison
-        plt.subplot(1, 2, 1)
-        names = class_df['name'].tolist()
-        train_acc = class_df['train_accuracy'].tolist()
-        test_acc = class_df['test_accuracy'].tolist()
+            # Accuracy comparison
+            plt.subplot(1, 2, 1)
+            names = class_df['name'].tolist()
+            train_acc = class_df['train_accuracy'].tolist()
+            test_acc = class_df['test_accuracy'].tolist()
 
-        x = np.arange(len(names))
-        width = 0.35
+            x = np.arange(len(names))
+            width = 0.35
 
-        plt.bar(x - width / 2, train_acc, width, label='Train Accuracy')
-        plt.bar(x + width / 2, test_acc, width, label='Test Accuracy')
+            plt.bar(x - width / 2, train_acc, width, label='Train Accuracy')
+            plt.bar(x + width / 2, test_acc, width, label='Test Accuracy')
 
-        plt.xlabel('Model')
-        plt.ylabel('Accuracy')
-        plt.title('Classification Accuracy Comparison')
-        plt.xticks(x, names, rotation=45)
-        plt.legend()
+            plt.xlabel('Model')
+            plt.ylabel('Accuracy')
+            plt.title('Classification Accuracy Comparison')
+            plt.xticks(x, names, rotation=45)
+            plt.legend()
 
-        # Time comparison
-        plt.subplot(1, 2, 2)
-        train_time = class_df['train_time'].tolist()
-        predict_time = class_df['predict_time'].tolist()
+            # Time comparison
+            plt.subplot(1, 2, 2)
+            train_time = class_df['train_time'].tolist()
+            predict_time = class_df['predict_time'].tolist()
 
-        plt.bar(x - width / 2, train_time, width, label='Train Time (s)')
-        plt.bar(x + width / 2, predict_time, width, label='Predict Time (s)')
+            plt.bar(x - width / 2, train_time, width, label='Train Time (s)')
+            plt.bar(x + width / 2, predict_time, width, label='Predict Time (s)')
 
-        plt.xlabel('Model')
-        plt.ylabel('Time (s)')
-        plt.title('Classification Time Comparison')
-        plt.xticks(x, names, rotation=45)
-        plt.legend()
+            plt.xlabel('Model')
+            plt.ylabel('Time (s)')
+            plt.title('Classification Time Comparison')
+            plt.xticks(x, names, rotation=45)
+            plt.legend()
 
-        plt.tight_layout()
-        plt.savefig("classification_comparison.png")
-        plt.close()
+            plt.tight_layout()
+            plt.savefig("classification_comparison.png")
+            plt.close()
+        except Exception as e:
+            print(f"Error creating classification summary charts: {str(e)}")
 
     # Regression summary
     if regression_results:
@@ -1084,58 +1175,61 @@ def summarize_results(classification_results, regression_results):
         reg_df = pd.DataFrame(regression_results)
         print(reg_df[['name', 'train_time', 'predict_time', 'train_mse', 'test_mse', 'train_r2', 'test_r2']])
 
-        # Plot comparison chart
-        plt.figure(figsize=(12, 8))
+        try:
+            # Plot comparison chart
+            plt.figure(figsize=(12, 8))
 
-        # MSE comparison
-        plt.subplot(2, 2, 1)
-        names = reg_df['name'].tolist()
-        train_mse = reg_df['train_mse'].tolist()
-        test_mse = reg_df['test_mse'].tolist()
+            # MSE comparison
+            plt.subplot(2, 2, 1)
+            names = reg_df['name'].tolist()
+            train_mse = reg_df['train_mse'].tolist()
+            test_mse = reg_df['test_mse'].tolist()
 
-        x = np.arange(len(names))
-        width = 0.35
+            x = np.arange(len(names))
+            width = 0.35
 
-        plt.bar(x - width / 2, train_mse, width, label='Train MSE')
-        plt.bar(x + width / 2, test_mse, width, label='Test MSE')
+            plt.bar(x - width / 2, train_mse, width, label='Train MSE')
+            plt.bar(x + width / 2, test_mse, width, label='Test MSE')
 
-        plt.xlabel('Model')
-        plt.ylabel('MSE')
-        plt.title('Regression MSE Comparison')
-        plt.xticks(x, names, rotation=45)
-        plt.legend()
+            plt.xlabel('Model')
+            plt.ylabel('MSE')
+            plt.title('Regression MSE Comparison')
+            plt.xticks(x, names, rotation=45)
+            plt.legend()
 
-        # R² comparison
-        plt.subplot(2, 2, 2)
-        train_r2 = reg_df['train_r2'].tolist()
-        test_r2 = reg_df['test_r2'].tolist()
+            # R² comparison
+            plt.subplot(2, 2, 2)
+            train_r2 = reg_df['train_r2'].tolist()
+            test_r2 = reg_df['test_r2'].tolist()
 
-        plt.bar(x - width / 2, train_r2, width, label='Train R²')
-        plt.bar(x + width / 2, test_r2, width, label='Test R²')
+            plt.bar(x - width / 2, train_r2, width, label='Train R²')
+            plt.bar(x + width / 2, test_r2, width, label='Test R²')
 
-        plt.xlabel('Model')
-        plt.ylabel('R²')
-        plt.title('Regression R² Comparison')
-        plt.xticks(x, names, rotation=45)
-        plt.legend()
+            plt.xlabel('Model')
+            plt.ylabel('R²')
+            plt.title('Regression R² Comparison')
+            plt.xticks(x, names, rotation=45)
+            plt.legend()
 
-        # Time comparison
-        plt.subplot(2, 2, 3)
-        train_time = reg_df['train_time'].tolist()
-        predict_time = reg_df['predict_time'].tolist()
+            # Time comparison
+            plt.subplot(2, 2, 3)
+            train_time = reg_df['train_time'].tolist()
+            predict_time = reg_df['predict_time'].tolist()
 
-        plt.bar(x - width / 2, train_time, width, label='Train Time (s)')
-        plt.bar(x + width / 2, predict_time, width, label='Predict Time (s)')
+            plt.bar(x - width / 2, train_time, width, label='Train Time (s)')
+            plt.bar(x + width / 2, predict_time, width, label='Predict Time (s)')
 
-        plt.xlabel('Model')
-        plt.ylabel('Time (s)')
-        plt.title('Regression Time Comparison')
-        plt.xticks(x, names, rotation=45)
-        plt.legend()
+            plt.xlabel('Model')
+            plt.ylabel('Time (s)')
+            plt.title('Regression Time Comparison')
+            plt.xticks(x, names, rotation=45)
+            plt.legend()
 
-        plt.tight_layout()
-        plt.savefig("regression_comparison.png")
-        plt.close()
+            plt.tight_layout()
+            plt.savefig("regression_comparison.png")
+            plt.close()
+        except Exception as e:
+            print(f"Error creating regression summary charts: {str(e)}")
 
 
 # --- Main Execution --- #
