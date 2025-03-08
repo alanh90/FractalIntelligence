@@ -441,7 +441,7 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
         plt.figure(figsize=(12, 10))
 
         # Set up colormap for classes/values
-        cmap = cm.get_cmap('viridis')
+        cmap = plt.colormaps.get('viridis')
 
         # Plot pressure points and flow pathways
         n_points = len(self.pressure_points)
@@ -474,7 +474,7 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
                 if flow > 0.1:  # Only plot significant flows
                     plt.plot([points_2d[i, 0], points_2d[j, 0]],
                              [points_2d[i, 1], points_2d[j, 1]],
-                             'k-', alpha=flow, linewidth=flow * 3)
+                             'k-', alpha=np.clip(flow, 0, 1), linewidth=min(flow * 3, 5))
 
         # Plot pressure points
         plt.scatter(points_2d[:, 0], points_2d[:, 1], s=100, c='blue',
@@ -489,14 +489,14 @@ class FluidTopoNetwork(BaseEstimator, ClassifierMixin):
             for center, strength, y_val in vortices_2d:
                 # Normalize value for color
                 color_val = (y_val - min_val) / (max_val - min_val + 1e-10)
-                plt.scatter(center[0], center[1], s=300 * strength,
+                plt.scatter(center[0], center[1], s=min(300 * strength, 500),
                             c=[cmap(color_val)], alpha=0.7, edgecolors='k')
         else:
             # For classification, color by class
             for center, strength, class_val in vortices_2d:
                 class_idx = np.where(self.classes_ == class_val)[0][0]
                 color_val = class_idx / (len(self.classes_) - 1) if len(self.classes_) > 1 else 0.5
-                plt.scatter(center[0], center[1], s=300 * strength,
+                plt.scatter(center[0], center[1], s=min(300 * strength, 500),
                             c=[cmap(color_val)], alpha=0.7, edgecolors='k',
                             label=f'Class {class_val}')
 
@@ -716,17 +716,17 @@ class EnhancedFluidTopoNetwork(FluidTopoNetwork):
         unique_classes = np.unique(y)
         for cls in unique_classes:
             plt.scatter(X[y == cls, 0], X[y == cls, 1],
-                        alpha=0.8, label=f'Class {cls}')
+                        alpha=np.clip(0.8, 0, 1), label=f'Class {cls}')
 
         # Plot vortices
         for center, strength, class_val in self.vortices:
-            plt.scatter(center[0], center[1], s=300 * strength,
+            plt.scatter(center[0], center[1], s=min(300 * strength, 500),
                         marker='*', color='black', edgecolors='white',
                         label=f'Vortex Class {class_val}')
 
         # Plot pressure points
         plt.scatter(self.pressure_points[:, 0], self.pressure_points[:, 1],
-                    s=100, marker='o', color='green', alpha=0.5,
+                    s=100, marker='o', color='green', alpha=np.clip(0.5, 0, 1),
                     label='Pressure Points')
 
         # Plot flow pathways
@@ -737,7 +737,7 @@ class EnhancedFluidTopoNetwork(FluidTopoNetwork):
                 if flow > 0.1:  # Only plot significant flows
                     plt.plot([self.pressure_points[i, 0], self.pressure_points[j, 0]],
                              [self.pressure_points[i, 1], self.pressure_points[j, 1]],
-                             'k-', alpha=flow, linewidth=flow * 3)
+                             'k-', alpha=np.clip(flow, 0, 1), linewidth=min(flow * 3, 5))
 
         plt.title(title)
         plt.xlabel('Feature 1')
@@ -797,12 +797,12 @@ class EnhancedFluidTopoNetwork(FluidTopoNetwork):
         unique_classes = np.unique(y)
         for cls in unique_classes:
             ax.scatter(X[y == cls, 0], X[y == cls, 1], cls,
-                       alpha=0.8, label=f'Class {cls}')
+                       alpha=np.clip(0.8, 0, 1), label=f'Class {cls}')
 
         # Plot vortices in 3D
         for center, strength, class_val in self.vortices:
             ax.scatter(center[0], center[1], class_val,
-                       s=300 * strength, marker='*', color='black',
+                       s=min(300 * strength, 500), marker='*', color='black',
                        label=f'Vortex Class {class_val}')
 
         ax.set_title(title)
@@ -828,9 +828,8 @@ def load_dataset(name, task="classification"):
             else:
                 raise ValueError(f"Unknown classification dataset: {name}")
         else:  # regression
-            if name == "Boston" or name == "California Housing":
+            if name == "California Housing":
                 data = fetch_california_housing()
-                name = "California Housing"  # Update name
             elif name == "Diabetes":
                 data = load_diabetes()
             else:
@@ -895,30 +894,45 @@ def evaluate_classification(dataset_name, X_train, X_test, y_train, y_test, feat
             # Visualizations for FluidTopoNetwork models
             if visualize and 'FluidTopo' in name:
                 if hasattr(model, 'visualize_model'):
-                    fig = model.visualize_model(X_train, y_train, title=f"{name} - {dataset_name}")
-                    plt.savefig(f"{name}_{dataset_name}_model.png")
-                    plt.close(fig)
+                    try:
+                        fig = model.visualize_model(X_train, y_train, title=f"{name} - {dataset_name}")
+                        plt.savefig(f"{name}_{dataset_name}_model.png")
+                        plt.close(fig)
+                    except Exception as e:
+                        print(f"{name} - Error: {str(e)}")
 
                 if hasattr(model, 'visualize_convergence'):
-                    fig = model.visualize_convergence()
-                    plt.savefig(f"{name}_{dataset_name}_convergence.png")
-                    plt.close(fig)
+                    try:
+                        fig = model.visualize_convergence()
+                        plt.savefig(f"{name}_{dataset_name}_convergence.png")
+                        plt.close(fig)
+                    except Exception as e:
+                        print(f"{name} - Error: {str(e)}")
 
                 if feature_names is not None and hasattr(model, 'visualize_feature_importance'):
-                    fig = model.visualize_feature_importance(feature_names)
-                    plt.savefig(f"{name}_{dataset_name}_feature_importance.png")
-                    plt.close(fig)
+                    try:
+                        fig = model.visualize_feature_importance(feature_names)
+                        plt.savefig(f"{name}_{dataset_name}_feature_importance.png")
+                        plt.close(fig)
+                    except Exception as e:
+                        print(f"{name} - Error: {str(e)}")
 
                 # For 2D datasets, visualize decision boundaries
                 if X_train.shape[1] == 2 and hasattr(model, 'visualize_decision_boundary'):
-                    fig = model.visualize_decision_boundary(X_train, y_train)
-                    plt.savefig(f"{name}_{dataset_name}_decision_boundary.png")
-                    plt.close(fig)
+                    try:
+                        fig = model.visualize_decision_boundary(X_train, y_train)
+                        plt.savefig(f"{name}_{dataset_name}_decision_boundary.png")
+                        plt.close(fig)
+                    except Exception as e:
+                        print(f"{name} - Error: {str(e)}")
 
                     if name == "EnhancedFluidTopoNetwork":
-                        fig = model.visualize_model_3d(X_train, y_train)
-                        plt.savefig(f"{name}_{dataset_name}_3d.png")
-                        plt.close(fig)
+                        try:
+                            fig = model.visualize_model_3d(X_train, y_train)
+                            plt.savefig(f"{name}_{dataset_name}_3d.png")
+                            plt.close(fig)
+                        except Exception as e:
+                            print(f"{name} - Error: {str(e)}")
 
         except Exception as e:
             print(f"{name} - Error: {str(e)}")
@@ -974,30 +988,42 @@ def evaluate_regression(dataset_name, X_train, X_test, y_train, y_test, feature_
             # Visualizations for FluidTopoRegressor
             if visualize and name == "FluidTopoRegressor":
                 if hasattr(model, 'visualize_model'):
-                    fig = model.visualize_model(X_train, y_train, title=f"{name} - {dataset_name}")
-                    plt.savefig(f"{name}_{dataset_name}_model.png")
-                    plt.close(fig)
+                    try:
+                        fig = model.visualize_model(X_train, y_train, title=f"{name} - {dataset_name}")
+                        plt.savefig(f"{name}_{dataset_name}_model.png")
+                        plt.close(fig)
+                    except Exception as e:
+                        print(f"{name} - Error: {str(e)}")
 
                 if hasattr(model, 'visualize_convergence'):
-                    fig = model.visualize_convergence()
-                    plt.savefig(f"{name}_{dataset_name}_convergence.png")
-                    plt.close(fig)
+                    try:
+                        fig = model.visualize_convergence()
+                        plt.savefig(f"{name}_{dataset_name}_convergence.png")
+                        plt.close(fig)
+                    except Exception as e:
+                        print(f"{name} - Error: {str(e)}")
 
                 if feature_names is not None and hasattr(model, 'visualize_feature_importance'):
-                    fig = model.visualize_feature_importance(feature_names)
-                    plt.savefig(f"{name}_{dataset_name}_feature_importance.png")
-                    plt.close(fig)
+                    try:
+                        fig = model.visualize_feature_importance(feature_names)
+                        plt.savefig(f"{name}_{dataset_name}_feature_importance.png")
+                        plt.close(fig)
+                    except Exception as e:
+                        print(f"{name} - Error: {str(e)}")
 
                 # For simple datasets, plot actual vs predicted
                 if X_train.shape[1] <= 3:
-                    plt.figure(figsize=(10, 6))
-                    plt.scatter(y_test, y_pred, alpha=0.5)
-                    plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'k--')
-                    plt.xlabel('Actual')
-                    plt.ylabel('Predicted')
-                    plt.title(f"{name} - {dataset_name} - Actual vs Predicted")
-                    plt.savefig(f"{name}_{dataset_name}_actual_vs_predicted.png")
-                    plt.close()
+                    try:
+                        plt.figure(figsize=(10, 6))
+                        plt.scatter(y_test, y_pred, alpha=0.5)
+                        plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'k--')
+                        plt.xlabel('Actual')
+                        plt.ylabel('Predicted')
+                        plt.title(f"{name} - {dataset_name} - Actual vs Predicted")
+                        plt.savefig(f"{name}_{dataset_name}_actual_vs_predicted.png")
+                        plt.close()
+                    except Exception as e:
+                        print(f"{name} - Error: {str(e)}")
 
         except Exception as e:
             print(f"{name} - Error: {str(e)}")
